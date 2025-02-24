@@ -35,6 +35,7 @@ class OMMFF:
         save_int=10,
         folder_name="",
         custom_forces=None,
+        force_groups=None,
         plumed_force=None,
     ):
         self.folder_name = folder_name
@@ -59,6 +60,7 @@ class OMMFF:
             for custom_force in custom_forces:
                 system.system.addForce(custom_force)
         self.custom_forces = custom_forces
+        self.force_groups = force_groups
         if (
             integrator_name == "csvr_leapfrog"
             or integrator_name == "csvr_leapfrog_end"
@@ -131,6 +133,13 @@ class OMMFF:
         # save initial state
         self.simulation.saveCheckpoint(f"{self.base_filename_2}_restart.chk")
         self.simulation.saveState(f"{self.base_filename_2}_restart.xml")
+        # get masses of the atoms
+        self.masses = np.array(
+            [
+                system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
+                for i in range(self.num_atoms)
+            ]
+        )
 
     def run_sim(self, steps, close_file=False):
         """Runs self.simulation for steps steps
@@ -193,10 +202,38 @@ class OMMFF:
 
         cvs = []
         if self.custom_forces is not None:
-            for custom_force in self.custom_forces:
-                cvs.append(
-                    custom_force.getCollectiveVariableValues(self.simulation.context)
+            # turn on track
+            self.simulation.context.setParameter("track", 1)
+            forces = []
+            for i, custom_force in enumerate(self.custom_forces):
+                state = self.simulation.context.getState(
+                    getEnergy=True,
+                    getForces=True,
+                    groups={self.force_groups[i]},
                 )
+                cvs.append(
+                    state.getPotentialEnergy().value_in_unit_system(md_unit_system)
+                )
+                forces.append(
+                    state.getForces(asNumpy=as_numpy).value_in_unit_system(
+                        md_unit_system
+                    )
+                )
+            forces = np.array(forces)
+            print(forces)
+            print(self.masses)
+            # now to get metric
+            metric = np.zeros((len(cvs), len(cvs)), dtype=np.float64)
+            for i in range(len(cvs)):
+                for j in range(i, len(cvs)):
+                    metric[i, j] = np.sum(
+                        forces[i] * forces[j] / (self.masses[:, np.newaxis])
+                    )
+                    metric[j, i] = metric[i, j]
+            print(metric)
+            exit()
+            # turn off track
+            self.simulation.context.setParameter("track", 0)
 
         return positions, velocities, forces, pe, ke, cell, cvs
 

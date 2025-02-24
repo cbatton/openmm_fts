@@ -1,15 +1,13 @@
 import argparse
 from pathlib import Path
 
-import numpy as np
 import openmm.unit as u
 
 # Import MPI
 from mpi4py import MPI
-from openmm.openmm import CustomBondForce, CustomCVForce
-from openmm.unit import nanometers
-from openmmtools import testsystems
+from openmm.openmm import CustomTorsionForce
 from openmmplumed import PlumedForce
+from openmmtools import testsystems
 
 from omm import OMMFF
 
@@ -21,12 +19,8 @@ parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
 parser.add_argument(
     "--integrator", type=str, help="Integrator to use", default="csvr_leapfrog"
 )
-parser.add_argument(
-    "--opes_type", type=str, help="Type of OPES", default="OPES_METAD"
-)
-parser.add_argument(
-    "--seed", type=int, help="Seed for the simulation", default=rank
-)
+parser.add_argument("--opes_type", type=str, help="Type of OPES", default="OPES_METAD")
+parser.add_argument("--seed", type=int, help="Seed for the simulation", default=rank)
 
 args = parser.parse_args()
 integrator = args.integrator
@@ -56,56 +50,55 @@ elif integrator == "langevin":
 elif integrator == "brownian":
     friction = 0.5 / u.picoseconds
 
-# Prepare custom force to give a backdoor to the CV
-# index0_1 = 0
-# index0_2 = 1
-# cv0 = CustomBondForce("r")
-# cv0.addBond(index0_1, index0_2)
-# r0 = 0.0 * nanometers
-# k0 = 0.0 * epsilon / sigma**2
-# bondForce0 = CustomCVForce("0.5 * k0 * (cv0-r0)^2")
-# bondForce0.addGlobalParameter("k0", k0)
-# bondForce0.addGlobalParameter("r0", r0)
-# bondForce0.addCollectiveVariable("cv0", cv0)
+# Prepare custom force to give a backdoor to the CV, metric tensor
+cv0 = CustomTorsionForce("track*theta")
+cv0.addGlobalParameter("track", 0)
+cv0.addTorsion(4, 6, 8, 14)
+cv0.setForceGroup(16)
+
+cv1 = CustomTorsionForce("track*theta")
+cv1.addGlobalParameter("track", 0)
+cv1.addTorsion(6, 8, 14, 16)
+cv1.setForceGroup(17)
+
+force_groups = [16, 17]
 
 # setup OPES
-# cv_line = "cv: DISTANCE ATOMS=1,2\n"
-# opes_line = f"opes: {opes_type} ...\n"
-# opes_line += "ARG=cv\n"
-# barrier = 12.0*0.824*120*u.kelvin*kB
-# convert barrier to kJ/mol
-# barrier = 1.25*barrier.value_in_unit(u.kilojoules_per_mole)
-# print(barrier)
-# opes_line += f"BARRIER={barrier}\n"
-# opes_line += f"PACE=1000 TEMP={temperature.value_in_unit(u.kelvin)}\n"
-# opes_line += f"FILE={folder_name_walker}/kernels.data\n"
-# opes_line += f"STATE_WFILE={folder_name_walker}/state.data\n"
-# opes_line += "STATE_WSTRIDE=10000\n"
-# opes_line += "NLIST\n"
-# opes_line += "...\n"
-# opes_line += f"PRINT STRIDE=1000 ARG=cv,opes.* FILE={folder_name_walker}/COLVAR\n"
+cv_line = "phi: TORSION ATOMS=5,7,9,15\n"
+cv_line += "psi: TORSION ATOMS=7,9,15,17\n"
+opes_line = f"opes: {opes_type} ...\n"
+opes_line += "ARG=phi,psi\n"
+opes_line += "BARRIER=30\n"
+opes_line += f"PACE=500 TEMP={temperature.value_in_unit(u.kelvin)}\n"
+opes_line += f"FILE={folder_name_walker}/kernels.data\n"
+opes_line += f"STATE_WFILE={folder_name_walker}/state.data\n"
+opes_line += "STATE_WSTRIDE=10000\n"
+opes_line += "NLIST\n"
+opes_line += "...\n"
+opes_line += f"PRINT STRIDE=1000 ARG=phi,psi,opes.* FILE={folder_name_walker}/COLVAR\n"
 
-# plumed_file = open(f"{folder_name_walker}plumed.dat", "w")
-# plumed_file.write("FLUSH STRIDE=10\n")
-# plumed_file.write(cv_line)
-# plumed_file.write(opes_line)
-# plumed_file.close()
+plumed_file = open(f"{folder_name_walker}plumed.dat", "w")
+plumed_file.write("FLUSH STRIDE=10\n")
+plumed_file.write(cv_line)
+plumed_file.write(opes_line)
+plumed_file.close()
 # Read in plumed file as a string
-# plumed_script = open(f"{folder_name_walker}plumed.dat", "r").read()
+plumed_script = open(f"{folder_name_walker}plumed.dat", "r").read()
 # print(plumed_script)
-# plumed_force = PlumedForce(plumed_script)
+plumed_force = PlumedForce(plumed_script)
 
 omm_ff = OMMFF(
     ala2,
     platform="CUDA",
-    seed=seed+1,
+    seed=seed + 1,
     folder_name=file_name,
     save_int=1000,
     temperature=temperature,
     time_step=time_step,
     friction=friction,
     integrator_name=integrator,
-    # custom_forces=[bondForce0],
-    # plumed_force=plumed_force,
+    custom_forces=[cv0, cv1],
+    force_groups=force_groups,
+    plumed_force=plumed_force,
 )
 omm_ff.generate_long_trajectory(num_data_points=200000)
