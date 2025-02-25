@@ -67,8 +67,9 @@ cv0_bias = CustomCVForce(
     "0.5 * kphi * delta^2; delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), abs(theta - phi0 - 2*pi))"
 )
 kphi = 250 * u.kilojoules_per_mole / u.radian**2
-# phi0 = -2.513 * u.radian
-phi0 = 1.0 * u.radian
+phi0_start = -2.513 * u.radian
+phi0_end = 1.0 * u.radian
+phi0 = phi0_start + (phi0_end - phi0_start) * rank / 16
 cv0_bias.addCollectiveVariable("theta", cv0_record)
 cv0_bias.addGlobalParameter("kphi", kphi)
 cv0_bias.addGlobalParameter("phi0", phi0)
@@ -79,8 +80,9 @@ cv1_bias = CustomCVForce(
     "0.5 * kpsi * delta^2; delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), abs(theta - psi0 - 2*pi))"
 )
 kpsi = 250 * u.kilojoules_per_mole / u.radian**2
-# psi0 = 2.83 * u.radian
-psi0 = -2.0 * u.radian
+psi0_start = 2.83 * u.radian
+psi0_end = -2.0 * u.radian
+psi0 = psi0_start + (psi0_end - psi0_start) * rank / 16
 cv1_bias.addCollectiveVariable("theta", cv1_record)
 cv1_bias.addGlobalParameter("kpsi", kpsi)
 cv1_bias.addGlobalParameter("psi0", psi0)
@@ -90,7 +92,7 @@ parameter_name = ["phi0", "psi0"]
 
 omm_ff = OMMFF(
     ala2,
-    platform="CUDA",
+    platform="CPU",
     seed=seed + 1,
     folder_name=file_name,
     save_int=1000,
@@ -104,5 +106,6 @@ omm_ff = OMMFF(
     string_freq=10,
     string_dt=0.01,
     custom_forces=[cv0_bias, cv1_bias],
+    comm=comm,
 )
-omm_ff.generate_long_trajectory(num_data_points=200000, burn_in=5)
+omm_ff.generate_long_trajectory(num_data_points=200000, burn_in=0)

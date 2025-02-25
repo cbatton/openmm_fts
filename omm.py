@@ -12,6 +12,7 @@ from openmm import (
 from openmm.app import CheckpointReporter, Simulation
 from openmm.unit import kelvin, md_unit_system, nanometers, picoseconds
 from openmm_csvr.csvr import CSVRIntegrator
+from scipy.interpolate import CubicSpline
 
 from traj_writer import TrajWriter
 
@@ -45,6 +46,7 @@ class OMMFF:
     ):
         self.folder_name = folder_name
         self.base_filename = f"{self.folder_name}"
+        print(f"Base filename: {self.base_filename}")
         # Get count from a count file if it exists, otherwise set to 0
         count_file = Path(f"{self.base_filename}_count.txt")
         if count_file.exists():
@@ -129,6 +131,7 @@ class OMMFF:
             system.system, integrator, platform, properties, system.topology
         )
         if count == 0:
+            print("Minimizing energy")
             self.simulation.context.setPositions(system.positions)
             self.simulation.minimizeEnergy()
             self.simulation.context.setVelocitiesToTemperature(temperature)
@@ -357,7 +360,6 @@ class OMMFF:
                     # average the CVs, metric
                     # as periodic, do
                     cvs_store_np = np.array(self.cvs_store)
-                    print(f"CVs store: {cvs_store_np}")
                     # subtract the initial cvs
                     cvs_store_np -= cvs0
                     cvs_store_np = cvs_store_np - 2 * np.pi * np.rint(
@@ -368,12 +370,41 @@ class OMMFF:
                     # cvs = np.arctan2(mean_cvs_y, mean_cvs_x)
                     cvs_diff = np.mean(cvs_store_np, axis=0)
                     metric = np.mean(self.metric_store, axis=0)
-                    print(f"CV0: {cvs0}")
-                    print(f"CV: {cvs_diff}")
-                    print(f"Metric: {metric}")
                     cv_update = cvs0 + self.string_dt * metric @ cvs_diff
                     cv_update = cv_update - 2 * np.pi * np.rint(cv_update / (2 * np.pi))
-                    print(f"CV update: {cv_update}")
+                    # String method communication steps
+                    if self.comm is not None:
+                        cv_global = np.zeros((self.size, len(cv_update)))
+                        self.comm.Allgather(cv_update, cv_global)
+                        if self.rank == 0:
+                            # interpolate the string, and update the parameters
+                            print(cv_global)
+                            t = np.linspace(0, 1, self.size)
+                            cv_global = np.unwrap(cv_global, axis=0)
+                            cs_spline = CubicSpline(t, cv_global, axis=0)
+                            # choose new t-values such that the string is equally spaced in CV-space
+                            arc_length = np.zeros(self.size)
+                            diffs = np.diff(cv_global, axis=0)
+                            segment_lengths = np.linalg.norm(diffs, axis=1)
+                            arc_length[1:] = np.cumsum(segment_lengths)
+                            arc_length /= arc_length[-1]
+                            equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
+                            t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
+                            cv_global = cs_spline(t_equal)
+                            print(cv_global)
+                            # update the parameters by communicating
+                            # send updated parameters to all ranks
+
+                            self.comm.Bcast(cv_global, root=0)
+                        else:
+                            cv_global = np.zeros_like(cv_global)
+                            self.comm.Bcast(cv_global, root=0)
+
+                        print(
+                            f"Rank {self.rank} updated parameters: {cv_global[self.rank]}"
+                        )
+                        cv_update = cv_global[self.rank]
+                        exit()
                     for i in range(len(self.parameter_name)):
                         self.simulation.context.setParameter(
                             self.parameter_name[i], cv_update[i]
