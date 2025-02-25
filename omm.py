@@ -35,8 +35,13 @@ class OMMFF:
         save_int=10,
         folder_name="",
         custom_forces=None,
+        string_forces=None,
         force_groups=None,
+        parameter_name=None,
+        string_freq=None,
+        string_dt=None,
         plumed_force=None,
+        comm=None,
     ):
         self.folder_name = folder_name
         self.base_filename = f"{self.folder_name}"
@@ -60,7 +65,22 @@ class OMMFF:
             for custom_force in custom_forces:
                 system.system.addForce(custom_force)
         self.custom_forces = custom_forces
+        if string_forces is not None:
+            if not isinstance(string_forces, list):
+                string_forces = [string_forces]
+            for custom_force in string_forces:
+                system.system.addForce(custom_force)
+            self.cvs_store = []
+            self.metric_store = []
+        self.string_forces = string_forces
         self.force_groups = force_groups
+        self.parameter_name = parameter_name
+        self.string_freq = string_freq
+        self.string_dt = string_dt
+        self.comm = comm
+        if self.comm is not None:
+            self.rank = self.comm.Get_rank()
+            self.size = self.comm.Get_size()
         if (
             integrator_name == "csvr_leapfrog"
             or integrator_name == "csvr_leapfrog_end"
@@ -201,11 +221,11 @@ class OMMFF:
         )
 
         cvs = []
-        if self.custom_forces is not None:
+        if self.string_forces is not None:
             # turn on track
             self.simulation.context.setParameter("track", 1)
-            forces = []
-            for i, custom_force in enumerate(self.custom_forces):
+            forces_metric = []
+            for i, custom_force in enumerate(self.string_forces):
                 state = self.simulation.context.getState(
                     getEnergy=True,
                     getForces=True,
@@ -214,24 +234,23 @@ class OMMFF:
                 cvs.append(
                     state.getPotentialEnergy().value_in_unit_system(md_unit_system)
                 )
-                forces.append(
+                forces_metric.append(
                     state.getForces(asNumpy=as_numpy).value_in_unit_system(
                         md_unit_system
                     )
                 )
-            forces = np.array(forces)
-            print(forces)
-            print(self.masses)
-            # now to get metric
+            forces_metric = np.array(forces_metric)
             metric = np.zeros((len(cvs), len(cvs)), dtype=np.float64)
             for i in range(len(cvs)):
                 for j in range(i, len(cvs)):
                     metric[i, j] = np.sum(
-                        forces[i] * forces[j] / (self.masses[:, np.newaxis])
+                        forces_metric[i]
+                        * forces_metric[j]
+                        / (self.masses[:, np.newaxis])
                     )
                     metric[j, i] = metric[i, j]
-            print(metric)
-            exit()
+            self.cvs_store.append(cvs)
+            self.metric_store.append(metric)
             # turn off track
             self.simulation.context.setParameter("track", 0)
 
@@ -247,6 +266,7 @@ class OMMFF:
         tag=None,
         time_max=117 * 60,
         precision=32,
+        burn_in=1,
     ):
         """Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs)
            are saved every save_freq time steps
@@ -284,7 +304,7 @@ class OMMFF:
             self.num_atoms,
             h5_chunk,
             precision=precision,
-            cvs=self.custom_forces,
+            cvs=self.string_forces,
         )
         for _ in range(start_iter, num_data_points):
             self.run_sim(save_freq)
@@ -318,8 +338,51 @@ class OMMFF:
                     self.num_atoms,
                     h5_freq,
                     precision=precision,
-                    cvs=self.custom_forces,
+                    cvs=self.string_forces,
                 )
+
+            if self.string_freq is not None:
+                if (
+                    _ % self.string_freq == 0
+                    and _ != 0
+                    and _ / self.string_freq > burn_in
+                ):
+                    # get initial parameters
+                    cvs0 = []
+                    for i in range(len(self.parameter_name)):
+                        cvs0.append(
+                            self.simulation.context.getParameter(self.parameter_name[i])
+                        )
+                    cvs0 = np.array(cvs0)
+                    # average the CVs, metric
+                    # as periodic, do
+                    cvs_store_np = np.array(self.cvs_store)
+                    print(f"CVs store: {cvs_store_np}")
+                    # subtract the initial cvs
+                    cvs_store_np -= cvs0
+                    cvs_store_np = cvs_store_np - 2 * np.pi * np.rint(
+                        cvs_store_np / (2 * np.pi)
+                    )
+                    # mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
+                    # mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
+                    # cvs = np.arctan2(mean_cvs_y, mean_cvs_x)
+                    cvs_diff = np.mean(cvs_store_np, axis=0)
+                    metric = np.mean(self.metric_store, axis=0)
+                    print(f"CV0: {cvs0}")
+                    print(f"CV: {cvs_diff}")
+                    print(f"Metric: {metric}")
+                    cv_update = cvs0 + self.string_dt * metric @ cvs_diff
+                    cv_update = cv_update - 2 * np.pi * np.rint(cv_update / (2 * np.pi))
+                    print(f"CV update: {cv_update}")
+                    for i in range(len(self.parameter_name)):
+                        self.simulation.context.setParameter(
+                            self.parameter_name[i], cv_update[i]
+                        )
+                    self.cvs_store = []
+                    self.metric_store = []
+                elif _ % self.string_freq == 0 and _ / self.string_freq <= burn_in:
+                    self.cvs_store = []
+                    self.metric_store = []
 
             # End timer
             time_end = time.time()
