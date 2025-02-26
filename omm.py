@@ -13,7 +13,7 @@ from openmm import (
 from openmm.app import CheckpointReporter, Simulation
 from openmm.unit import kelvin, md_unit_system, nanometers, picoseconds
 from openmm_csvr.csvr import CSVRIntegrator
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import interp1d
 
 from traj_writer import TrajWriter
 
@@ -42,6 +42,7 @@ class OMMFF:
         parameter_name=None,
         string_freq=None,
         string_dt=None,
+        string_kappa=None,
         plumed_force=None,
         comm=None,
     ):
@@ -80,10 +81,12 @@ class OMMFF:
         self.parameter_name = parameter_name
         self.string_freq = string_freq
         self.string_dt = string_dt
+        self.string_kappa = string_kappa * string_dt
         self.comm = comm
         if self.comm is not None:
             self.rank = self.comm.Get_rank()
             self.size = self.comm.Get_size()
+            self.string_kappa *= self.size
         if (
             integrator_name == "csvr_leapfrog"
             or integrator_name == "csvr_leapfrog_end"
@@ -314,6 +317,7 @@ class OMMFF:
             precision=precision,
             cvs=self.string_forces,
         )
+        self.adam = Adam(lr=self.string_dt)
         for _ in range(start_iter, num_data_points):
             self.run_sim(save_freq)
             (
@@ -362,6 +366,8 @@ class OMMFF:
                             self.simulation.context.getParameter(self.parameter_name[i])
                         )
                     cvs0 = np.array(cvs0)
+                    cvs0_global = np.zeros((self.size, len(cvs0)))
+                    self.comm.Allgather(cvs0, cvs0_global)
                     # average the CVs, metric
                     # as periodic, do
                     cvs_store_np = np.array(self.cvs_store)
@@ -375,7 +381,53 @@ class OMMFF:
                     # cvs = np.arctan2(mean_cvs_y, mean_cvs_x)
                     cvs_diff = np.mean(cvs_store_np, axis=0)
                     metric = np.mean(self.metric_store, axis=0)
-                    cv_update = cvs0 + self.string_dt * metric @ cvs_diff
+                    if self.rank == 0 or self.rank == self.size - 1:
+                        metric = np.ones_like(metric)
+                    grad = -metric @ cvs_diff
+                    projection = np.zeros((len(cvs_diff), len(cvs_diff)))
+                    # set diagonal of projection to 1
+                    np.fill_diagonal(projection, 1)
+                    projection_test = np.copy(projection)
+                    pos_diff = None
+                    pos_diff_size = None
+                    pos_diff_grad = None
+                    neg_diff = None
+                    neg_diff_size = None
+                    if self.rank < self.size - 1:
+                        pos_diff = cvs0_global[self.rank + 1] - cvs0
+                        pos_diff -= 2 * np.pi * np.rint(pos_diff / (2 * np.pi))
+                        pos_diff_size = np.linalg.norm(pos_diff)
+                        pos_diff_grad = np.dot(pos_diff, grad)
+                    if self.rank > 0:
+                        neg_diff = cvs0_global[self.rank - 1] - cvs0
+                        neg_diff -= 2 * np.pi * np.rint(neg_diff / (2 * np.pi))
+                        neg_diff_size = np.linalg.norm(neg_diff)
+                    if pos_diff is not None and neg_diff is not None:
+                        if pos_diff_grad >= 0:
+                            projection_test -= (
+                                np.outer(pos_diff, pos_diff) / pos_diff_size**2
+                            )
+                        else:
+                            projection_test -= (
+                                np.outer(neg_diff, neg_diff) / neg_diff_size**2
+                            )
+                    grad = projection @ grad
+                    # now also compute smoothing term
+                    if self.rank > 0 and self.rank < self.size - 1:
+                        central_diff_pos = cvs0_global[self.rank + 1] - cvs0
+                        central_diff_pos -= (
+                            2 * np.pi * np.rint(central_diff_pos / (2 * np.pi))
+                        )
+                        central_diff_neg = cvs0_global[self.rank - 1] - cvs0
+                        central_diff_neg -= (
+                            2 * np.pi * np.rint(central_diff_neg / (2 * np.pi))
+                        )
+                        central_diff = central_diff_pos + central_diff_neg
+                        central_diff = central_diff - 2 * np.pi * np.rint(
+                            central_diff / (2 * np.pi)
+                        )
+                        grad -= self.string_kappa * central_diff / self.string_dt
+                    cv_update = self.adam.update(cvs0, grad)
                     cv_update = cv_update - 2 * np.pi * np.rint(cv_update / (2 * np.pi))
                     # String method communication steps
                     if self.comm is not None:
@@ -385,7 +437,6 @@ class OMMFF:
                             # interpolate the string, and update the parameters
                             t = np.linspace(0, 1, self.size)
                             cv_global = np.unwrap(cv_global, axis=0)
-                            cs_spline = CubicSpline(t, cv_global, axis=0)
                             # choose new t-values such that the string is equally spaced in CV-space
                             arc_length = np.zeros(self.size)
                             diffs = np.diff(cv_global, axis=0)
@@ -394,7 +445,7 @@ class OMMFF:
                             arc_length /= arc_length[-1]
                             equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
                             t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
-                            cv_global = cs_spline(t_equal)
+                            cv_global = interp1d(t, cv_global, axis=0)(t_equal)
                             # convert back to being in the range of -pi to pi
                             cv_global = cv_global - 2 * np.pi * np.rint(
                                 cv_global / (2 * np.pi)
@@ -433,3 +484,28 @@ class OMMFF:
         self.simulation.reporters[1].close()
         h5_file.early_close()
         h5_string.close()
+
+
+class Adam:
+    def __init__(self, lr=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.epsilon = epsilon
+        self.m = None
+        self.v = None
+        self.t = 0
+
+    def update(self, params, grads):
+        if self.m is None:
+            self.m = np.zeros_like(params)
+            self.v = np.zeros_like(params)
+
+        self.t += 1
+        self.m = self.beta1 * self.m + (1 - self.beta1) * grads
+        self.v = self.beta2 * self.v + (1 - self.beta2) * (grads**2)
+        m_hat = self.m / (1 - self.beta1**self.t)
+        v_hat = self.v / (1 - self.beta2**self.t)
+
+        params -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+        return params

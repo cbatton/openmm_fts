@@ -166,7 +166,8 @@ omm_ff = OMMFF(
     parameter_name=parameter_name,
     string_freq=10,
     string_dt=0.1,
+    string_kappa=0.1,
     custom_forces=[cv0_bias, cv1_bias],
     comm=comm,
 )
-omm_ff.generate_long_trajectory(num_data_points=100, burn_in=5, save_freq=100)
+omm_ff.generate_long_trajectory(num_data_points=1000, burn_in=5, save_freq=100)
