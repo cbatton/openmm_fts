@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+import h5py
 import numpy as np
 from mdtraj.reporters import HDF5Reporter
 from openmm import (
@@ -301,6 +302,10 @@ class OMMFF:
             start_iter = 0
             pass
 
+        # prepare h5 file on rank 0 to store string data at each update
+        h5_string = h5py.File(f"{self.base_filename_2}_string.h5", "w")
+        string_count = 0
+
         h5_chunk = -(start_iter % h5_freq) + h5_freq + 1
         h5_file = TrajWriter(
             f"{self.base_filename_2}_{self.internal_count}_data.h5",
@@ -378,7 +383,6 @@ class OMMFF:
                         self.comm.Allgather(cv_update, cv_global)
                         if self.rank == 0:
                             # interpolate the string, and update the parameters
-                            print(cv_global)
                             t = np.linspace(0, 1, self.size)
                             cv_global = np.unwrap(cv_global, axis=0)
                             cs_spline = CubicSpline(t, cv_global, axis=0)
@@ -391,20 +395,22 @@ class OMMFF:
                             equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
                             t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
                             cv_global = cs_spline(t_equal)
+                            # convert back to being in the range of -pi to pi
+                            cv_global = cv_global - 2 * np.pi * np.rint(
+                                cv_global / (2 * np.pi)
+                            )
                             print(cv_global)
-                            # update the parameters by communicating
-                            # send updated parameters to all ranks
-
-                            self.comm.Bcast(cv_global, root=0)
+                            h5_string.create_group(f"config_{string_count}")
+                            h5_string[f"config_{string_count}"].create_dataset(
+                                "cvs",
+                                data=cv_global,
+                                dtype=np.float64,
+                            )
+                            string_count += 1
+                            self.comm.Scatter(cv_global, cv_update, root=0)
                         else:
-                            cv_global = np.zeros_like(cv_global)
-                            self.comm.Bcast(cv_global, root=0)
+                            self.comm.Scatter(cv_global, cv_update, root=0)
 
-                        print(
-                            f"Rank {self.rank} updated parameters: {cv_global[self.rank]}"
-                        )
-                        cv_update = cv_global[self.rank]
-                        exit()
                     for i in range(len(self.parameter_name)):
                         self.simulation.context.setParameter(
                             self.parameter_name[i], cv_update[i]
@@ -421,7 +427,9 @@ class OMMFF:
             if time_end - time_start > time_max:
                 self.simulation.reporters[1].close()
                 h5_file.early_close()
+                h5_string.close()
                 exit(0)
         # If naturally ended, close the h5 files
         self.simulation.reporters[1].close()
         h5_file.early_close()
+        h5_string.close()

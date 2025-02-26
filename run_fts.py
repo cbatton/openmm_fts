@@ -1,6 +1,10 @@
 import argparse
+import glob
+import re
 from pathlib import Path
 
+import mdtraj as md
+import numpy as np
 import openmm.unit as u
 
 # Import MPI
@@ -10,8 +14,16 @@ from openmmtools import testsystems
 
 from omm import OMMFF
 
+
+def natural_sort(l):
+    convert = lambda text: int(text) if text.isdigit() else text.lower()
+    alphanum_key = lambda key: [convert(c) for c in re.split("([0-9]+)", key)]
+    return sorted(l, key=alphanum_key)
+
+
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
+size = comm.Get_size()
 
 # Run MPI umbrella sampling simulation
 parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
@@ -41,7 +53,7 @@ if not Path(folder_name).exists():
     Path(folder_name).mkdir(parents=True)
 if not Path(folder_name_walker).exists():
     Path(folder_name_walker).mkdir(parents=True)
-time_step = 0.001 * u.picoseconds
+time_step = 0.0005 * u.picoseconds
 if "csvr" in integrator:
     friction = 0.01 * u.picoseconds
 elif integrator == "langevin":
@@ -67,9 +79,10 @@ cv0_bias = CustomCVForce(
     "0.5 * kphi * delta^2; delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), abs(theta - phi0 - 2*pi))"
 )
 kphi = 250 * u.kilojoules_per_mole / u.radian**2
-phi0_start = -2.513 * u.radian
+# phi0_start = -3 * u.radian
+phi0_start = -2.51 * u.radian
 phi0_end = 1.0 * u.radian
-phi0 = phi0_start + (phi0_end - phi0_start) * rank / 16
+phi0 = phi0_start + (phi0_end - phi0_start) * rank / size
 cv0_bias.addCollectiveVariable("theta", cv0_record)
 cv0_bias.addGlobalParameter("kphi", kphi)
 cv0_bias.addGlobalParameter("phi0", phi0)
@@ -80,9 +93,10 @@ cv1_bias = CustomCVForce(
     "0.5 * kpsi * delta^2; delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), abs(theta - psi0 - 2*pi))"
 )
 kpsi = 250 * u.kilojoules_per_mole / u.radian**2
+# psi0_start = -3 * u.radian
 psi0_start = 2.83 * u.radian
-psi0_end = -2.0 * u.radian
-psi0 = psi0_start + (psi0_end - psi0_start) * rank / 16
+psi0_end = -1.6 * u.radian
+psi0 = psi0_start + (psi0_end - psi0_start) * rank / size
 cv1_bias.addCollectiveVariable("theta", cv1_record)
 cv1_bias.addGlobalParameter("kpsi", kpsi)
 cv1_bias.addGlobalParameter("psi0", psi0)
@@ -90,12 +104,59 @@ cv1_bias.addGlobalParameter("psi0", psi0)
 force_groups = [16, 17]
 parameter_name = ["phi0", "psi0"]
 
+# find initial positions with closest phi and psi
+traj_files = natural_sort(glob.glob("runs_ref_metad/0/ala2_*.h5"))
+traj_files = [x for x in traj_files if "data" not in x][:-1]
+psi_angles = []
+phi_angles = []
+traj_file_identity = []
+for i, traj_file in enumerate(traj_files):
+    traj = md.load(traj_file)
+    phi = md.compute_phi(traj)
+    psi = md.compute_psi(traj)
+    phi_angles.append(phi[1])
+    psi_angles.append(psi[1])
+    traj_file_identity.append(i * np.ones(len(phi[1])))
+psi_angles = np.concatenate(psi_angles)
+phi_angles = np.concatenate(phi_angles)
+traj_file_identity = np.concatenate(traj_file_identity)
+
+# get the file with the closest phi and psi
+min_dist = 1000
+for i in range(len(phi_angles)):
+    dist = np.sqrt(
+        (phi_angles[i] - phi0.value_in_unit(u.radian)) ** 2
+        + (psi_angles[i] - psi0.value_in_unit(u.radian)) ** 2
+    )
+    if dist < min_dist:
+        min_dist = dist
+        traj_file = traj_file_identity[i]
+
+# get the initial positions
+traj = md.load(traj_files[int(traj_file)])
+phi = md.compute_phi(traj)[1]
+psi = md.compute_psi(traj)[1]
+# find min index in this traj
+min_dist = 1000
+min_index = 0
+for i in range(len(phi)):
+    dist = np.sqrt(
+        (phi[i] - phi0.value_in_unit(u.radian)) ** 2
+        + (psi[i] - psi0.value_in_unit(u.radian)) ** 2
+    )
+    if dist < min_dist:
+        min_dist = dist
+        min_index = i
+positions = traj.xyz[min_index]
+ala2.positions = positions
+print(ala2.positions)
+
 omm_ff = OMMFF(
     ala2,
     platform="CPU",
     seed=seed + 1,
     folder_name=file_name,
-    save_int=1000,
+    save_int=100,
     temperature=temperature,
     time_step=time_step,
     friction=friction,
@@ -104,8 +165,8 @@ omm_ff = OMMFF(
     force_groups=force_groups,
     parameter_name=parameter_name,
     string_freq=10,
-    string_dt=0.01,
+    string_dt=0.1,
     custom_forces=[cv0_bias, cv1_bias],
     comm=comm,
 )
-omm_ff.generate_long_trajectory(num_data_points=200000, burn_in=0)
+omm_ff.generate_long_trajectory(num_data_points=100, burn_in=5, save_freq=100)
