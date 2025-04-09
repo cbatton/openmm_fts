@@ -81,7 +81,10 @@ class OMMFF:
         self.parameter_name = parameter_name
         self.string_freq = string_freq
         self.string_dt = string_dt
-        self.string_kappa = string_kappa * string_dt
+        if string_kappa is not None:
+            self.string_kappa = string_kappa * string_dt
+        else:
+            self.string_kappa = None
         self.comm = comm
         if self.comm is not None:
             self.rank = self.comm.Get_rank()
@@ -376,11 +379,11 @@ class OMMFF:
                     cvs_store_np = cvs_store_np - 2 * np.pi * np.rint(
                         cvs_store_np / (2 * np.pi)
                     )
-                    # mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
-                    # mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
-                    # cvs = np.arctan2(mean_cvs_y, mean_cvs_x)
-                    cvs_diff = np.mean(cvs_store_np, axis=0)
+                    mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
+                    mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
+                    cvs_diff = np.arctan2(mean_cvs_y, mean_cvs_x)
                     metric = np.mean(self.metric_store, axis=0)
+                    inv_metric = np.linalg.inv(metric)
                     if self.rank == 0 or self.rank == self.size - 1:
                         metric = np.ones_like(metric)
                     grad = -metric @ cvs_diff
@@ -432,15 +435,31 @@ class OMMFF:
                     # String method communication steps
                     if self.comm is not None:
                         cv_global = np.zeros((self.size, len(cv_update)))
+                        inv_metric_global = np.zeros(
+                            (self.size, len(cv_update), len(cv_update))
+                        )
                         self.comm.Allgather(cv_update, cv_global)
+                        self.comm.Allgather(inv_metric, inv_metric_global)
                         if self.rank == 0:
                             # interpolate the string, and update the parameters
                             t = np.linspace(0, 1, self.size)
-                            cv_global = np.unwrap(cv_global, axis=0)
+                            for i in range(1, self.size):
+                                for j in range(len(cv_update)):
+                                    if cv_global[i, j] - cv_global[i - 1, j] > np.pi:
+                                        cv_global[i:, j] = cv_global[i:, j] - 2 * np.pi
+                                    elif cv_global[i, j] - cv_global[i - 1, j] < -np.pi:
+                                        cv_global[i:, j] = cv_global[i:, j] + 2 * np.pi
                             # choose new t-values such that the string is equally spaced in CV-space
                             arc_length = np.zeros(self.size)
-                            diffs = np.diff(cv_global, axis=0)
-                            segment_lengths = np.linalg.norm(diffs, axis=1)
+                            delta_cv = cv_global[1:] - cv_global[:-1]
+                            segment_lengths = np.sqrt(
+                                np.einsum(
+                                    "ni,nij,nj->n",
+                                    delta_cv,
+                                    inv_metric_global[:-1],
+                                    delta_cv,
+                                )
+                            )
                             arc_length[1:] = np.cumsum(segment_lengths)
                             arc_length /= arc_length[-1]
                             equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
@@ -456,6 +475,16 @@ class OMMFF:
                                 "cvs",
                                 data=cv_global,
                                 dtype=np.float64,
+                            )
+                            h5_string[f"config_{string_count}"].create_dataset(
+                                "inv_metric",
+                                data=inv_metric_global,
+                                dtype=np.float64,
+                            )
+                            h5_string[f"config_{string_count}"].create_dataset(
+                                "internal_count",
+                                data=self.internal_count,
+                                dtype=int,
                             )
                             string_count += 1
                             self.comm.Scatter(cv_global, cv_update, root=0)
