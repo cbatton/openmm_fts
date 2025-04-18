@@ -81,8 +81,8 @@ cv0_bias = CustomCVForce(
 kphi = 250 * u.kilojoules_per_mole / u.radian**2
 # phi0_start = -3 * u.radian
 phi0_start = -2.51 * u.radian
-phi0_end = 1.0 * u.radian
-phi0 = phi0_start + (phi0_end - phi0_start) * rank / size
+phi0_end = 0.82 * u.radian
+phi0 = phi0_start + (phi0_end - phi0_start) * rank / (size - 1)
 # if rank == 0:
 # phi0 = -3.00 * u.radian
 cv0_bias.addCollectiveVariable("theta", cv0_record)
@@ -97,8 +97,8 @@ cv1_bias = CustomCVForce(
 kpsi = 250 * u.kilojoules_per_mole / u.radian**2
 # psi0_start = -3 * u.radian
 psi0_start = 2.83 * u.radian
-psi0_end = -1.6 * u.radian
-psi0 = psi0_start + (psi0_end - psi0_start) * rank / size
+psi0_end = -1.88 * u.radian
+psi0 = psi0_start + (psi0_end - psi0_start) * rank / (size - 1)
 # if rank == 0:
 # psi0 = -3.00 * u.radian
 cv1_bias.addCollectiveVariable("theta", cv1_record)
@@ -177,9 +177,11 @@ omm_ff = OMMFF(
     string_freq=20,
     string_dt=0.1,
     string_kappa=0.1,
+    cv_weights=[1.0, 1.0],
+    update_ends=False,
     custom_forces=[cv0_bias, cv1_bias],
     comm=comm,
 )
 omm_ff.generate_long_trajectory(
-    num_data_points=20000, burn_in=15, save_freq=100, h5_freq=10
+    num_data_points=1000, burn_in=15, save_freq=100, h5_freq=10
 )

@@ -43,6 +43,8 @@ class OMMFF:
         string_freq=None,
         string_dt=None,
         string_kappa=None,
+        cv_weights=None,
+        update_ends=True,
         plumed_force=None,
         comm=None,
     ):
@@ -85,6 +87,9 @@ class OMMFF:
             self.string_kappa = string_kappa * string_dt
         else:
             self.string_kappa = None
+        if cv_weights is not None:
+            self.cv_weights = np.array(cv_weights)
+        self.update_ends = update_ends
         self.comm = comm
         if self.comm is not None:
             self.rank = self.comm.Get_rank()
@@ -387,10 +392,7 @@ class OMMFF:
                     if self.rank == 0 or self.rank == self.size - 1:
                         metric = np.ones_like(metric)
                     grad = -metric @ cvs_diff
-                    projection = np.zeros((len(cvs_diff), len(cvs_diff)))
-                    # set diagonal of projection to 1
-                    np.fill_diagonal(projection, 1)
-                    projection_test = np.copy(projection)
+                    projection = np.eye(len(cvs_diff))
                     pos_diff = None
                     pos_diff_size = None
                     pos_diff_grad = None
@@ -407,11 +409,11 @@ class OMMFF:
                         neg_diff_size = np.linalg.norm(neg_diff)
                     if pos_diff is not None and neg_diff is not None:
                         if pos_diff_grad >= 0:
-                            projection_test -= (
+                            projection -= (
                                 np.outer(pos_diff, pos_diff) / pos_diff_size**2
                             )
                         else:
-                            projection_test -= (
+                            projection -= (
                                 np.outer(neg_diff, neg_diff) / neg_diff_size**2
                             )
                     grad = projection @ grad
@@ -430,6 +432,9 @@ class OMMFF:
                             central_diff / (2 * np.pi)
                         )
                         grad -= self.string_kappa * central_diff / self.string_dt
+                    if not self.update_ends:
+                        if self.rank == 0 or self.rank == self.size - 1:
+                            grad = np.zeros_like(grad)
                     cv_update = self.adam.update(cvs0, grad)
                     cv_update = cv_update - 2 * np.pi * np.rint(cv_update / (2 * np.pi))
                     # String method communication steps
@@ -442,6 +447,7 @@ class OMMFF:
                         self.comm.Allgather(inv_metric, inv_metric_global)
                         if self.rank == 0:
                             # interpolate the string, and update the parameters
+                            cv_global_pre = cv_global.copy()
                             t = np.linspace(0, 1, self.size)
                             for i in range(1, self.size):
                                 for j in range(len(cv_update)):
@@ -452,19 +458,25 @@ class OMMFF:
                             # choose new t-values such that the string is equally spaced in CV-space
                             arc_length = np.zeros(self.size)
                             delta_cv = cv_global[1:] - cv_global[:-1]
-                            segment_lengths = np.sqrt(
-                                np.einsum(
-                                    "ni,nij,nj->n",
-                                    delta_cv,
-                                    inv_metric_global[:-1],
-                                    delta_cv,
+                            if self.cv_weights is None:
+                                segment_lengths = np.sqrt(
+                                    np.einsum(
+                                        "ni,nij,nj->n",
+                                        delta_cv,
+                                        inv_metric_global[:-1],
+                                        delta_cv,
+                                    )
                                 )
-                            )
+                            else:
+                                delta_cv *= self.cv_weights[np.newaxis, :]
+                                segment_lengths = np.linalg.norm(delta_cv, axis=1)
                             arc_length[1:] = np.cumsum(segment_lengths)
                             arc_length /= arc_length[-1]
                             equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
                             t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
-                            cv_global = interp1d(t, cv_global, axis=0)(t_equal)
+                            cv_global = interp1d(t, cv_global, axis=0, kind="cubic")(
+                                t_equal
+                            )
                             # convert back to being in the range of -pi to pi
                             cv_global = cv_global - 2 * np.pi * np.rint(
                                 cv_global / (2 * np.pi)
@@ -474,6 +486,11 @@ class OMMFF:
                             h5_string[f"config_{string_count}"].create_dataset(
                                 "cvs",
                                 data=cv_global,
+                                dtype=np.float64,
+                            )
+                            h5_string[f"config_{string_count}"].create_dataset(
+                                "cvs_pre",
+                                data=cv_global_pre,
                                 dtype=np.float64,
                             )
                             h5_string[f"config_{string_count}"].create_dataset(
