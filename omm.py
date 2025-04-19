@@ -2,6 +2,7 @@ import time
 from pathlib import Path
 
 import h5py
+import numba
 import numpy as np
 from mdtraj.reporters import HDF5Reporter
 from openmm import (
@@ -45,6 +46,7 @@ class OMMFF:
         string_kappa=None,
         cv_weights=None,
         update_ends=True,
+        update_scheme="explicit",
         plumed_force=None,
         comm=None,
     ):
@@ -95,6 +97,21 @@ class OMMFF:
             self.rank = self.comm.Get_rank()
             self.size = self.comm.Get_size()
             self.string_kappa *= self.size
+        if update_scheme == "explicit":
+            self.update_scheme = "explicit"
+        elif update_scheme == "implicit":
+            self.update_scheme = "implicit"
+            # create vectors for Thomas algorithm
+            self.a_vec = np.zeros(self.size - 1, dtype=np.float64)
+            self.b_vec = np.zeros(self.size, dtype=np.float64)
+            self.c_vec = np.zeros(self.size - 1, dtype=np.float64)
+            self.a_vec[:-1] = -self.string_kappa
+            self.c_vec[1:] = -self.string_kappa
+            self.b_vec[1:-1] = 1 + 2 * self.string_kappa
+            self.b_vec[0] = 1
+            self.b_vec[-1] = 1
+        else:
+            raise ValueError("Update scheme not recognized")
         if (
             integrator_name == "csvr_leapfrog"
             or integrator_name == "csvr_leapfrog_end"
@@ -325,7 +342,8 @@ class OMMFF:
             precision=precision,
             cvs=self.string_forces,
         )
-        self.adam = Adam(lr=self.string_dt)
+        if self.update_scheme == "explicit":
+            self.adam = Adam(lr=self.string_dt)
         for _ in range(start_iter, num_data_points):
             self.run_sim(save_freq)
             (
@@ -418,7 +436,12 @@ class OMMFF:
                             )
                     grad = projection @ grad
                     # now also compute smoothing term
-                    if self.rank > 0 and self.rank < self.size - 1:
+                    if (
+                        self.rank > 0
+                        and self.rank < self.size - 1
+                        and self.string_kappa is not None
+                        and self.update_scheme == "explicit"
+                    ):
                         central_diff_pos = cvs0_global[self.rank + 1] - cvs0
                         central_diff_pos -= (
                             2 * np.pi * np.rint(central_diff_pos / (2 * np.pi))
@@ -435,26 +458,41 @@ class OMMFF:
                     if not self.update_ends:
                         if self.rank == 0 or self.rank == self.size - 1:
                             grad = np.zeros_like(grad)
-                    cv_update = self.adam.update(cvs0, grad)
-                    cv_update = cv_update - 2 * np.pi * np.rint(cv_update / (2 * np.pi))
+                    if self.update_scheme == "explicit":
+                        cv_update = self.adam.update(cvs0, grad)
+                        cv_update = cv_update - 2 * np.pi * np.rint(
+                            cv_update / (2 * np.pi)
+                        )
                     # String method communication steps
                     if self.comm is not None:
-                        cv_global = np.zeros((self.size, len(cv_update)))
-                        inv_metric_global = np.zeros(
-                            (self.size, len(cv_update), len(cv_update))
-                        )
-                        self.comm.Allgather(cv_update, cv_global)
+                        cv_global = np.zeros((self.size, len(cvs0)))
+                        inv_metric_global = np.zeros((self.size, len(cvs0), len(cvs0)))
+                        grad_global = np.zeros((self.size, len(cvs0)))
+                        if self.update_scheme == "explicit":
+                            self.comm.Allgather(cv_update, cv_global)
+                        elif self.update_scheme == "implicit":
+                            self.comm.Allgather(cvs0, cv_global)
+                            self.comm.Allgather(grad, grad_global)
                         self.comm.Allgather(inv_metric, inv_metric_global)
                         if self.rank == 0:
                             # interpolate the string, and update the parameters
                             cv_global_pre = cv_global.copy()
                             t = np.linspace(0, 1, self.size)
                             for i in range(1, self.size):
-                                for j in range(len(cv_update)):
+                                for j in range(len(cvs0)):
                                     if cv_global[i, j] - cv_global[i - 1, j] > np.pi:
                                         cv_global[i:, j] = cv_global[i:, j] - 2 * np.pi
                                     elif cv_global[i, j] - cv_global[i - 1, j] < -np.pi:
                                         cv_global[i:, j] = cv_global[i:, j] + 2 * np.pi
+                            # apply implicit update here
+                            if self.update_scheme == "implicit":
+                                # Thomas algorithm
+                                cv_global = ThomasInverse_batch_d(
+                                    self.a_vec,
+                                    self.b_vec,
+                                    self.c_vec,
+                                    cv_global - self.string_dt * grad_global,
+                                )
                             # choose new t-values such that the string is equally spaced in CV-space
                             arc_length = np.zeros(self.size)
                             delta_cv = cv_global[1:] - cv_global[:-1]
@@ -474,7 +512,7 @@ class OMMFF:
                             arc_length /= arc_length[-1]
                             equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
                             t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
-                            cv_global = interp1d(t, cv_global, axis=0, kind="cubic")(
+                            cv_global = interp1d(t, cv_global, axis=0, kind="linear")(
                                 t_equal
                             )
                             # convert back to being in the range of -pi to pi
@@ -504,13 +542,13 @@ class OMMFF:
                                 dtype=int,
                             )
                             string_count += 1
-                            self.comm.Scatter(cv_global, cv_update, root=0)
+                            self.comm.Scatter(cv_global, cvs0, root=0)
                         else:
-                            self.comm.Scatter(cv_global, cv_update, root=0)
+                            self.comm.Scatter(cv_global, cvs0, root=0)
 
                     for i in range(len(self.parameter_name)):
                         self.simulation.context.setParameter(
-                            self.parameter_name[i], cv_update[i]
+                            self.parameter_name[i], cvs0[i]
                         )
                     self.cvs_store = []
                     self.metric_store = []
@@ -555,3 +593,39 @@ class Adam:
 
         params -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
         return params
+
+
+@numba.njit(cache=True, parallel=True)
+def ThomasInverse_batch_d(a, b, c, d):
+    """
+    Solves a batch of tridiagonal systems Ax=d, where A is the same for
+    all systems but d varies.
+    """
+    n = b.shape[0]
+    B = d.shape[1]  # Batch size
+
+    c_prime = np.zeros(n - 1, dtype=np.float64)
+    d_prime = np.zeros((n, B), dtype=np.float64)
+    x = np.zeros((n, B), dtype=np.float64)
+
+    # --- Forward elimination ---
+    b0_inv = 1.0 / b[0]
+    c_prime[0] = c[0] * b0_inv
+    d_prime[0, :] = d[0, :] * b0_inv
+
+    for i in range(1, n - 1):
+        denom = b[i] - a[i - 1] * c_prime[i - 1]
+        denom_inv = 1.0 / denom
+        c_prime[i] = c[i] * denom_inv
+        d_prime[i, :] = (d[i, :] - a[i - 1] * d_prime[i - 1, :]) * denom_inv
+
+    denom_last = b[n - 1] - a[n - 2] * c_prime[n - 2]
+    denom_last_inv = 1.0 / denom_last
+    d_prime[n - 1, :] = (d[n - 1, :] - a[n - 2] * d_prime[n - 2, :]) * denom_last_inv
+
+    # --- Backward substitution (Batched) ---
+    x[n - 1, :] = d_prime[n - 1, :]
+    for i in range(n - 2, -1, -1):
+        x[i, :] = d_prime[i, :] - c_prime[i] * x[i + 1, :]
+
+    return x
