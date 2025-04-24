@@ -41,12 +41,12 @@ class OMMFF:
         string_forces=None,
         force_groups=None,
         parameter_name=None,
+        parameter_force_name=None,
         string_freq=None,
         string_dt=None,
         string_kappa=None,
         cv_weights=None,
         update_ends=True,
-        update_scheme="explicit",
         plumed_force=None,
         comm=None,
     ):
@@ -83,10 +83,11 @@ class OMMFF:
         self.string_forces = string_forces
         self.force_groups = force_groups
         self.parameter_name = parameter_name
+        self.parameter_force_name = parameter_force_name
         self.string_freq = string_freq
         self.string_dt = string_dt
         if string_kappa is not None:
-            self.string_kappa = string_kappa * string_dt
+            self.string_kappa = string_kappa
         else:
             self.string_kappa = None
         if cv_weights is not None:
@@ -96,22 +97,15 @@ class OMMFF:
         if self.comm is not None:
             self.rank = self.comm.Get_rank()
             self.size = self.comm.Get_size()
-            self.string_kappa *= self.size
-        if update_scheme == "explicit":
-            self.update_scheme = "explicit"
-        elif update_scheme == "implicit":
-            self.update_scheme = "implicit"
-            # create vectors for Thomas algorithm
-            self.a_vec = np.zeros(self.size - 1, dtype=np.float64)
-            self.b_vec = np.zeros(self.size, dtype=np.float64)
-            self.c_vec = np.zeros(self.size - 1, dtype=np.float64)
-            self.a_vec[:-1] = -self.string_kappa
-            self.c_vec[1:] = -self.string_kappa
-            self.b_vec[1:-1] = 1 + 2 * self.string_kappa
-            self.b_vec[0] = 1
-            self.b_vec[-1] = 1
-        else:
-            raise ValueError("Update scheme not recognized")
+        # create vectors for Thomas algorithm
+        self.a_vec = np.zeros(self.size - 1, dtype=np.float64)
+        self.b_vec = np.zeros(self.size, dtype=np.float64)
+        self.c_vec = np.zeros(self.size - 1, dtype=np.float64)
+        self.a_vec[:-1] = -self.string_kappa
+        self.c_vec[1:] = -self.string_kappa
+        self.b_vec[1:-1] = 1 + 2 * self.string_kappa
+        self.b_vec[0] = 1
+        self.b_vec[-1] = 1
         if (
             integrator_name == "csvr_leapfrog"
             or integrator_name == "csvr_leapfrog_end"
@@ -299,6 +293,8 @@ class OMMFF:
         time_max=117 * 60,
         precision=32,
         burn_in=1,
+        beta1=0.9,
+        beta2=0.999,
     ):
         """Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs)
            are saved every save_freq time steps
@@ -342,8 +338,7 @@ class OMMFF:
             precision=precision,
             cvs=self.string_forces,
         )
-        if self.update_scheme == "explicit":
-            self.adam = Adam(lr=self.string_dt)
+        self.adam = Adam(lr=self.string_dt, beta1=beta1, beta2=beta2)
         for _ in range(start_iter, num_data_points):
             self.run_sim(save_freq)
             (
@@ -393,6 +388,17 @@ class OMMFF:
                         )
                     cvs0 = np.array(cvs0)
                     cvs0_global = np.zeros((self.size, len(cvs0)))
+
+                    # Get current forces for cvs
+                    forces0 = []
+                    for i in range(len(self.parameter_force_name)):
+                        forces0.append(
+                            self.simulation.context.getParameter(
+                                self.parameter_force_name[i]
+                            )
+                        )
+                    forces0 = np.array(forces0)
+
                     self.comm.Allgather(cvs0, cvs0_global)
                     # average the CVs, metric
                     # as periodic, do
@@ -405,6 +411,7 @@ class OMMFF:
                     mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
                     mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
                     cvs_diff = np.arctan2(mean_cvs_y, mean_cvs_x)
+                    cvs_diff *= forces0
                     metric = np.mean(self.metric_store, axis=0)
                     inv_metric = np.linalg.inv(metric)
                     if self.rank == 0 or self.rank == self.size - 1:
@@ -435,44 +442,17 @@ class OMMFF:
                                 np.outer(neg_diff, neg_diff) / neg_diff_size**2
                             )
                     grad = projection @ grad
-                    # now also compute smoothing term
-                    if (
-                        self.rank > 0
-                        and self.rank < self.size - 1
-                        and self.string_kappa is not None
-                        and self.update_scheme == "explicit"
-                    ):
-                        central_diff_pos = cvs0_global[self.rank + 1] - cvs0
-                        central_diff_pos -= (
-                            2 * np.pi * np.rint(central_diff_pos / (2 * np.pi))
-                        )
-                        central_diff_neg = cvs0_global[self.rank - 1] - cvs0
-                        central_diff_neg -= (
-                            2 * np.pi * np.rint(central_diff_neg / (2 * np.pi))
-                        )
-                        central_diff = central_diff_pos + central_diff_neg
-                        central_diff = central_diff - 2 * np.pi * np.rint(
-                            central_diff / (2 * np.pi)
-                        )
-                        grad -= self.string_kappa * central_diff / self.string_dt
                     if not self.update_ends:
                         if self.rank == 0 or self.rank == self.size - 1:
                             grad = np.zeros_like(grad)
-                    if self.update_scheme == "explicit":
-                        cv_update = self.adam.update(cvs0, grad)
-                        cv_update = cv_update - 2 * np.pi * np.rint(
-                            cv_update / (2 * np.pi)
-                        )
+                    grad = self.adam.update(grad)
                     # String method communication steps
                     if self.comm is not None:
                         cv_global = np.zeros((self.size, len(cvs0)))
                         inv_metric_global = np.zeros((self.size, len(cvs0), len(cvs0)))
                         grad_global = np.zeros((self.size, len(cvs0)))
-                        if self.update_scheme == "explicit":
-                            self.comm.Allgather(cv_update, cv_global)
-                        elif self.update_scheme == "implicit":
-                            self.comm.Allgather(cvs0, cv_global)
-                            self.comm.Allgather(grad, grad_global)
+                        self.comm.Allgather(cvs0, cv_global)
+                        self.comm.Allgather(grad, grad_global)
                         self.comm.Allgather(inv_metric, inv_metric_global)
                         if self.rank == 0:
                             # interpolate the string, and update the parameters
@@ -484,15 +464,13 @@ class OMMFF:
                                         cv_global[i:, j] = cv_global[i:, j] - 2 * np.pi
                                     elif cv_global[i, j] - cv_global[i - 1, j] < -np.pi:
                                         cv_global[i:, j] = cv_global[i:, j] + 2 * np.pi
-                            # apply implicit update here
-                            if self.update_scheme == "implicit":
-                                # Thomas algorithm
-                                cv_global = ThomasInverse_batch_d(
-                                    self.a_vec,
-                                    self.b_vec,
-                                    self.c_vec,
-                                    cv_global - self.string_dt * grad_global,
-                                )
+                            # Thomas algorithm
+                            cv_global = ThomasInverse_batch_d(
+                                self.a_vec,
+                                self.b_vec,
+                                self.c_vec,
+                                cv_global - grad_global,
+                            )
                             # choose new t-values such that the string is equally spaced in CV-space
                             arc_length = np.zeros(self.size)
                             delta_cv = cv_global[1:] - cv_global[:-1]
@@ -541,6 +519,11 @@ class OMMFF:
                                 data=self.internal_count,
                                 dtype=int,
                             )
+                            h5_string[f"config_{string_count}"].create_dataset(
+                                "grad",
+                                data=grad_global,
+                                dtype=np.float64,
+                            )
                             string_count += 1
                             self.comm.Scatter(cv_global, cvs0, root=0)
                         else:
@@ -580,10 +563,10 @@ class Adam:
         self.v = None
         self.t = 0
 
-    def update(self, params, grads):
+    def update(self, grads):
         if self.m is None:
-            self.m = np.zeros_like(params)
-            self.v = np.zeros_like(params)
+            self.m = np.zeros_like(grads)
+            self.v = np.zeros_like(grads)
 
         self.t += 1
         self.m = self.beta1 * self.m + (1 - self.beta1) * grads
@@ -591,8 +574,8 @@ class Adam:
         m_hat = self.m / (1 - self.beta1**self.t)
         v_hat = self.v / (1 - self.beta2**self.t)
 
-        params -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
-        return params
+        grad_adam = self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+        return grad_adam
 
 
 @numba.njit(cache=True, parallel=True)
