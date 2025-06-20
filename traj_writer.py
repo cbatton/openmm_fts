@@ -6,7 +6,9 @@ class TrajWriter:
     Class to write trajectory data to a file.
     """
 
-    def __init__(self, filename, num_atoms, num_frames, precision=32, cvs=None):
+    def __init__(
+        self, filename, num_atoms, num_frames, precision=32, cvs=None, rank=None
+    ):
         self.filename = filename
         self.num_atoms = num_atoms
         self.num_frames = num_frames
@@ -22,6 +24,8 @@ class TrajWriter:
 
         if cvs is not None:
             self.cvs = cvs
+        if rank is not None:
+            self.rank = rank
 
         self.file.create_dataset(
             "positions",
@@ -55,6 +59,10 @@ class TrajWriter:
                 self.file.create_dataset(
                     f"cv_{i}", (self.num_frames, 1), dtype=precision_str, chunks=(1, 1)
                 )
+        if rank is not None:
+            self.file.create_dataset(
+                "rank", (self.num_frames, 1), dtype="i4", chunks=(1, 1)
+            )
         self.frame = 0
 
     def write_frame(
@@ -66,6 +74,7 @@ class TrajWriter:
         ke,
         cell,
         cvs=None,
+        rank=None,
     ):
         self.file["positions"][self.frame] = positions
         self.file["velocities"][self.frame] = velocities
@@ -76,6 +85,8 @@ class TrajWriter:
         if cvs is not None:
             for i, cv in enumerate(cvs):
                 self.file[f"cv_{i}"][self.frame] = cv
+        if rank is not None:
+            self.file["rank"][self.frame] = rank
         self.frame += 1
 
     def close(self):
@@ -92,4 +103,6 @@ class TrajWriter:
         if self.cvs is not None:
             for i, cv in enumerate(self.cvs):
                 self.file[f"cv_{i}"].resize(self.frame, axis=0)
+        if self.rank is not None:
+            self.file["rank"].resize(self.frame, axis=0)
         self.file.close()
