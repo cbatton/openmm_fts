@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+import h5py
 import numba
 import numpy as np
 from mdtraj.reporters import HDF5Reporter
@@ -188,6 +189,8 @@ class OMMFF:
             self.comm.Allgather(self.force_values_rank, self.force_values)
             self.replica_rank = self.rank
             if self.rank == 0:
+                self.num_attempted = None
+                self.num_accepted = None
                 print(f"Parameter values: {self.parameter_values}")
                 print(f"Force values: {self.force_values}")
                 print("Beta value:", self.beta)
@@ -362,9 +365,15 @@ class OMMFF:
                         replica_rank_all,
                         self.nswap_attemps,
                     )
+                    if self.num_attempted is None:
+                        self.num_attempted = num_attempted
+                        self.num_accepted = num_accepted
+                    else:
+                        self.num_attempted += num_attempted
+                        self.num_accepted += num_accepted
                     print(f"Replica rank: {replica_rank_new}")
-                    print(f"Number of accepted swaps: {num_accepted}")
-                    print(f"Number of attempted swaps: {num_attempted}")
+                    print(f"Number of accepted swaps: {self.num_accepted}")
+                    print(f"Number of attempted swaps: {self.num_attempted}")
                 else:
                     replica_rank_new = np.zeros(self.size, dtype=np.int64)
                 # communicate the new replica rank
@@ -391,6 +400,17 @@ class OMMFF:
                 cvs=cvs,
                 rank=self.replica_rank,
             )
+            # save a top level file with replica ranks
+            # h5 file
+            if self.comm is not None:
+                if self.rank == 0:
+                    with h5py.File("replica_ranks.h5", "a") as f:
+                        # keep appending to it
+                        if len(f.keys()) == 0:
+                            f.create_dataset("replica_ranks_0", data=self.replica_rank)
+                        else:
+                            dset_name = f"replica_ranks_{len(f.keys())}"
+                            f.create_dataset(dset_name, data=self.replica_rank)
 
             if _ % h5_freq == 0 and _ != 0:
                 self.simulation.reporters[1].close()
@@ -446,11 +466,11 @@ def mix_replicas(
 
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]
-    energy_ij = np.zeros((n_replicas, n_replicas), dtype=np.float64)
+    energy_ij_store = np.zeros((n_replicas, n_replicas), dtype=np.float64)
     for i in range(n_replicas):
         for j in range(n_replicas):
             if i != j:
-                energy_ij[i, j] = 0.5 * np.sum(
+                energy_ij_store[i, j] = 0.5 * np.sum(
                     force_values[i] * (cvs_all[j] - parameter_values[i]) ** 2
                 )
 
@@ -472,18 +492,10 @@ def mix_replicas(
         num_attempted[state_i, state_j] += 1
         num_attempted[state_j, state_i] += 1
 
-        energy_ii = 0.5 * np.sum(
-            force_values[state_i] * (cvs_all[i] - parameter_values[state_i]) ** 2
-        )
-        energy_jj = 0.5 * np.sum(
-            force_values[state_j] * (cvs_all[j] - parameter_values[state_j]) ** 2
-        )
-        energy_ij = 0.5 * np.sum(
-            force_values[state_i] * (cvs_all[j] - parameter_values[state_i]) ** 2
-        )
-        energy_ji = 0.5 * np.sum(
-            force_values[state_j] * (cvs_all[i] - parameter_values[state_j]) ** 2
-        )
+        energy_ii = energy_ij_store[state_i, i]
+        energy_jj = energy_ij_store[state_j, j]
+        energy_ij = energy_ij_store[state_i, j]
+        energy_ji = energy_ij_store[state_j, i]
 
         log_p_accept = -beta * (energy_ij + energy_ji - energy_ii - energy_jj)
 
@@ -493,7 +505,7 @@ def mix_replicas(
             # Swap the replicas
             replica_rank[i] = state_j
             replica_rank[j] = state_i
-            num_accepted[i, j] += 1
-            num_accepted[j, i] += 1
+            num_accepted[state_i, state_j] += 1
+            num_accepted[state_j, state_i] += 1
 
     return replica_rank, num_accepted, num_attempted
