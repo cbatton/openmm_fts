@@ -196,6 +196,22 @@ class OMMFF:
                 print("Beta value:", self.beta)
             # should have something here to handle restarting
             # as not necessarily the case the initial values are what they should be
+            # check if replica_ranks file exists
+            if Path("replica_ranks.h5").exists():
+                with h5py.File("replica_ranks.h5", "r") as f:
+                    # get the last config
+                    replica_rank_new = f[list(f.keys())[-1]][:]
+                    self.replica_rank = replica_rank_new[self.rank]
+                    print(f"Replica rank loaded: {self.rank} {self.replica_rank}")
+                    # set the context parameters to the correct values
+                    for i, name in enumerate(self.parameter_name):
+                        self.simulation.context.setParameter(
+                            name, self.parameter_values[self.replica_rank, i]
+                        )
+                    for i, name in enumerate(self.parameter_force_name):
+                        self.simulation.context.setParameter(
+                            name, self.force_values[self.replica_rank, i]
+                        )
 
     def run_sim(self, steps, close_file=False):
         """Runs self.simulation for steps steps
@@ -389,6 +405,35 @@ class OMMFF:
                             name, self.force_values[replica_rank_new[self.rank], i]
                         )
                 self.replica_rank = replica_rank_new[self.rank]
+                # save a top level file with replica ranks, swap rates
+                if self.rank == 0:
+                    with h5py.File("replica_ranks.h5", "a") as f:
+                        # keep appending to it
+                        if len(f.keys()) == 0:
+                            f.create_dataset(
+                                f"config_{self.count}_{len(f.keys())}",
+                                data=replica_rank_new,
+                            )
+                        else:
+                            dset_name = f"config_{self.count}_{len(f.keys())}"
+                            f.create_dataset(dset_name, data=replica_rank_new)
+                    with h5py.File("swap_rates.h5", "a") as f:
+                        if len(f.keys()) == 0:
+                            group = f.create_group(
+                                f"config_{self.count}_{len(f.keys())}"
+                            )
+                            group.create_dataset("num_accepted", data=self.num_accepted)
+                            group.create_dataset(
+                                "num_attempted", data=self.num_attempted
+                            )
+                        else:
+                            group = f.create_group(
+                                f"config_{self.count}_{len(f.keys())}"
+                            )
+                            group.create_dataset("num_accepted", data=self.num_accepted)
+                            group.create_dataset(
+                                "num_attempted", data=self.num_attempted
+                            )
 
             h5_file.write_frame(
                 positions,
@@ -400,17 +445,6 @@ class OMMFF:
                 cvs=cvs,
                 rank=self.replica_rank,
             )
-            # save a top level file with replica ranks
-            # h5 file
-            if self.comm is not None:
-                if self.rank == 0:
-                    with h5py.File("replica_ranks.h5", "a") as f:
-                        # keep appending to it
-                        if len(f.keys()) == 0:
-                            f.create_dataset("replica_ranks_0", data=self.replica_rank)
-                        else:
-                            dset_name = f"replica_ranks_{len(f.keys())}"
-                            f.create_dataset(dset_name, data=self.replica_rank)
 
             if _ % h5_freq == 0 and _ != 0:
                 self.simulation.reporters[1].close()
