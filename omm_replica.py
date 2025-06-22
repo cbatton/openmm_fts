@@ -50,6 +50,7 @@ class OMMFF:
         parameter_force_name=None,
         plumed_force=None,
         comm=None,
+        swap_scheme="mixing",
     ):
         self.folder_name = folder_name
         self.base_filename = f"{self.folder_name}"
@@ -164,6 +165,11 @@ class OMMFF:
         self.simulation.saveState(f"{self.base_filename_2}_restart.xml")
         # replica exchange info
         # should collect all information needed to do it
+        # Validate swap_scheme
+        if swap_scheme not in ["mixing", "neighbors"]:
+            raise ValueError(
+                f"swap_scheme must be 'mixing' or 'neighbors', got '{swap_scheme}'"
+            )
         self.beta = 1.0 / (temperature * BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA)
         self.beta = self.beta.value_in_unit_system(md_unit_system)
         if self.comm is not None:
@@ -373,14 +379,25 @@ class OMMFF:
                 )
                 # swap
                 if self.rank == 0:
-                    replica_rank_new, num_accepted, num_attempted = mix_replicas(
-                        self.beta,
-                        cvs_all,
-                        self.parameter_values,
-                        self.force_values,
-                        replica_rank_all,
-                        self.nswap_attemps,
-                    )
+                    if self.swap_scheme == "neighbors":
+                        replica_rank_new, num_accepted, num_attempted = (
+                            mix_neighboring_replicas(
+                                self.beta,
+                                cvs_all,
+                                self.parameter_values,
+                                self.force_values,
+                                replica_rank_all,
+                            )
+                        )
+                    elif self.swap_scheme == "mixing":
+                        replica_rank_new, num_accepted, num_attempted = mix_replicas(
+                            self.beta,
+                            cvs_all,
+                            self.parameter_values,
+                            self.force_values,
+                            replica_rank_all,
+                            self.nswap_attemps,
+                        )
                     if self.num_attempted is None:
                         self.num_attempted = num_attempted
                         self.num_accepted = num_accepted
@@ -503,10 +520,9 @@ def mix_replicas(
     energy_ij_store = np.zeros((n_replicas, n_replicas), dtype=np.float64)
     for i in range(n_replicas):
         for j in range(n_replicas):
-            if i != j:
-                energy_ij_store[i, j] = 0.5 * np.sum(
-                    force_values[i] * (cvs_all[j] - parameter_values[i]) ** 2
-                )
+            energy_ij_store[i, j] = 0.5 * np.sum(
+                force_values[i] * (cvs_all[j] - parameter_values[i]) ** 2
+            )
 
     # Initialize the number of accepted and attempted swaps
     num_accepted = np.zeros((n_replicas, n_replicas), dtype=np.int64)
@@ -521,6 +537,70 @@ def mix_replicas(
 
         state_i = replica_rank[i]
         state_j = replica_rank[j]
+
+        # Increment the attempted swaps
+        num_attempted[state_i, state_j] += 1
+        num_attempted[state_j, state_i] += 1
+
+        energy_ii = energy_ij_store[state_i, i]
+        energy_jj = energy_ij_store[state_j, j]
+        energy_ij = energy_ij_store[state_i, j]
+        energy_ji = energy_ij_store[state_j, i]
+
+        log_p_accept = -beta * (energy_ij + energy_ji - energy_ii - energy_jj)
+
+        # Calculate the acceptance probability
+        # Decide whether to swap based on the acceptance probability
+        if log_p_accept >= 0 or np.random.rand() < np.exp(log_p_accept):
+            # Swap the replicas
+            replica_rank[i] = state_j
+            replica_rank[j] = state_i
+            num_accepted[state_i, state_j] += 1
+            num_accepted[state_j, state_i] += 1
+
+    return replica_rank, num_accepted, num_attempted
+
+
+def mix_neighboring_replicas(
+    beta,
+    cvs_all,
+    parameter_values,
+    force_values,
+    replica_rank,
+):
+    """Mixes replicas based on the Metropolis criterion
+    Arguments:
+        beta: A float corresponding to the inverse temperature
+        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
+        parameter_values: A numpy array of shape (n_replicas, n_parameters) corresponding to the parameter values of all replicas
+        force_values: A numpy array of shape (n_replicas, n_forces) corresponding to the force values of all replicas
+        replica_rank: An int corresponding to the rank of the current replica
+        nswap_attemps: An int specifying the number of swap attempts
+    Returns:
+        replica_rank: An int corresponding to the new rank of the replica after mixing
+        num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
+        num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
+    """
+
+    # precompute the acceptance probabilities
+    n_replicas = cvs_all.shape[0]
+    energy_ij_store = np.zeros((n_replicas, n_replicas), dtype=np.float64)
+    for i in range(n_replicas):
+        for j in range(n_replicas):
+            energy_ij_store[i, j] = 0.5 * np.sum(
+                force_values[i] * (cvs_all[j] - parameter_values[i]) ** 2
+            )
+
+    # Initialize the number of accepted and attempted swaps
+    num_accepted = np.zeros((n_replicas, n_replicas), dtype=np.int64)
+    num_attempted = np.zeros((n_replicas, n_replicas), dtype=np.int64)
+
+    # Randomly select pairs of neighboring replicas to swap
+    offset = np.random.randint(2)
+    for state_i in range(offset, n_replicas - 1, 2):
+        state_j = state_i + 1
+        i = np.where(replica_rank == state_i)[0][0]
+        j = np.where(replica_rank == state_j)[0][0]
 
         # Increment the attempted swaps
         num_attempted[state_i, state_j] += 1
