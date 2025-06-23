@@ -170,6 +170,7 @@ class OMMFF:
             raise ValueError(
                 f"swap_scheme must be 'mixing' or 'neighbors', got '{swap_scheme}'"
             )
+        self.swap_scheme = swap_scheme
         self.beta = 1.0 / (temperature * BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA)
         self.beta = self.beta.value_in_unit_system(md_unit_system)
         if self.comm is not None:
