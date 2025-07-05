@@ -1,3 +1,5 @@
+"""OpenMM interface for the string method with collective variables."""
+
 import time
 from pathlib import Path
 
@@ -20,9 +22,7 @@ from traj_writer import TrajWriter
 
 
 class OMMFF:
-    """
-    OMM Interface with a given system
-    """
+    """OMM Interface with a given system."""
 
     def __init__(
         self,
@@ -47,24 +47,67 @@ class OMMFF:
         string_kappa=None,
         cv_weights=None,
         update_ends=True,
-        plumed_force=None,
         comm=None,
     ):
+        self._setup_filenames_and_count(folder_name)
+        self._initialize_system_forces(
+            system,
+            velocities_com,
+            custom_forces,
+            string_forces,
+        )
+        self.force_groups = force_groups
+        self.parameter_name = parameter_name
+        self.parameter_force_name = parameter_force_name
+        self._initialize_string_parameters(
+            string_kappa,
+            string_freq,
+            string_dt,
+            cv_weights,
+            update_ends,
+            comm,
+        )
+        integrator = self._create_integrator(
+            integrator_name,
+            temperature,
+            friction,
+            time_step,
+            seed,
+        )
+
+        self._initialize_simulation(
+            system,
+            integrator,
+            platform,
+            precision,
+            system.topology,
+        )
+        self._load_or_initialize(system, temperature)
+        self._setup_reporters(save_int)
+        # get number of atoms, masses of the atoms
+        self.num_atoms = len(system.positions)
+        self.masses = np.array([
+            system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
+            for i in range(self.num_atoms)
+        ])
+
+    def _setup_filenames_and_count(self, folder_name):
+        """Sets up the filenames and count for the simulation."""
         self.folder_name = folder_name
         self.base_filename = f"{self.folder_name}"
-        print(f"Base filename: {self.base_filename}")
-        # Get count from a count file if it exists, otherwise set to 0
         count_file = Path(f"{self.base_filename}_count.txt")
         if count_file.exists():
-            count = int(np.loadtxt(count_file) + 1)
-            np.savetxt(count_file, [count], fmt="%d")
+            self.count = int(np.loadtxt(count_file) + 1)
         else:
-            count = 0
-            np.savetxt(count_file, [count], fmt="%d")
-        self.count = count
+            self.count = 0
+        np.savetxt(count_file, [self.count], fmt="%d")
         self.base_filename_2 = f"{self.folder_name}_{self.count}"
         self.internal_count = 0
-        self.save_int = save_int
+
+    def _initialize_system_forces(
+        self, system, velocities_com, custom_forces, string_forces
+    ):
+        """Initializes the system forces for the simulation."""
         if velocities_com:
             system.system.addForce(CMMotionRemover())
         if custom_forces is not None:
@@ -81,17 +124,18 @@ class OMMFF:
             self.cvs_store = []
             self.metric_store = []
         self.string_forces = string_forces
-        self.force_groups = force_groups
-        self.parameter_name = parameter_name
-        self.parameter_force_name = parameter_force_name
+
+    def _initialize_string_parameters(
+        self, string_kappa, string_freq, string_dt, cv_weights, update_ends, comm
+    ):
+        """Initializes the string parameters for the simulation."""
+        self.string_kappa = string_kappa
         self.string_freq = string_freq
         self.string_dt = string_dt
-        if string_kappa is not None:
-            self.string_kappa = string_kappa
-        else:
-            self.string_kappa = None
         if cv_weights is not None:
             self.cv_weights = np.array(cv_weights)
+        else:
+            self.cv_weights = None
         self.update_ends = update_ends
         self.comm = comm
         if self.comm is not None:
@@ -106,39 +150,72 @@ class OMMFF:
         self.b_vec[1:-1] = 1 + 2 * self.string_kappa
         self.b_vec[0] = 1
         self.b_vec[-1] = 1
-        if (
-            integrator_name == "csvr_leapfrog"
-            or integrator_name == "csvr_leapfrog_end"
-            or integrator_name == "csvr_verlet"
-            or integrator_name == "csvr_verlet_end"
-        ):
-            # Remove csvr_ from integrator name, and set integrator
-            integrator_name = integrator_name[5:]
+
+    def _create_integrator(
+        self, integrator_name, temperature, friction, time_step, seed
+    ):
+        """Creates an OpenMM integrator based on the given parameters."""
+        if integrator_name == "csvr_leapfrog":
             integrator = CSVRIntegrator(
-                system=system.system,
+                system=self.simulation.system,
                 temperature=temperature,
                 tau=friction,
                 timestep=time_step,
-                scheme=integrator_name,
+                scheme="leapfrog",
             )
-            integrator.setRandomNumberSeed(seed)
+        elif integrator_name == "csvr_leapfrog_end":
+            integrator = CSVRIntegrator(
+                system=self.simulation.system,
+                temperature=temperature,
+                tau=friction,
+                timestep=time_step,
+                scheme="leapfrog_end",
+            )
+        elif integrator_name == "csvr_verlet":
+            integrator = CSVRIntegrator(
+                system=self.simulation.system,
+                temperature=temperature,
+                tau=friction,
+                timestep=time_step,
+                scheme="verlet",
+            )
+        elif integrator_name == "csvr_verlet_end":
+            integrator = CSVRIntegrator(
+                system=self.simulation.system,
+                temperature=temperature,
+                tau=friction,
+                timestep=time_step,
+                scheme="verlet_end",
+            )
         elif integrator_name == "langevin":
             integrator = LangevinMiddleIntegrator(
                 temperature,
                 friction,
                 time_step,
             )
-            integrator.setRandomNumberSeed(seed)
         elif integrator_name == "brownian":
             integrator = BrownianIntegrator(
                 temperature,
                 friction,
                 time_step,
             )
-            integrator.setRandomNumberSeed(seed)
         else:
             raise ValueError("Integrator name not recognized")
+        integrator.setRandomNumberSeed(seed)
+        return integrator
 
+    def _initialize_simulation(self, system, integrator, platform, precision, topology):
+        """Initializes an OpenMM simulation.
+
+        Arguments:
+            system: An OpenMM system
+            integrator: An OpenMM integrator
+            platform: An OpenMM platform specifying the device information
+            precision: A string specifying the precision of the simulation
+            topology: An OpenMM topology object
+        Returns:
+            simulation: An OpenMM simulation object
+        """
         platform = Platform.getPlatformByName(platform)
         properties = {}
         if platform == "CUDA":
@@ -146,14 +223,37 @@ class OMMFF:
         elif platform == "CPU":
             properties = {"Threads": "1"}
 
-        # Set up plumed if using
-        if plumed_force is not None:
-            system.system.addForce(plumed_force)
-
         self.simulation = self._init_simulation(
-            system.system, integrator, platform, properties, system.topology
+            system,
+            integrator,
+            platform,
+            properties,
+            topology,
         )
-        if count == 0:
+
+    def _init_simulation(self, system, integrator, platform, properties, topology):
+        """Initializes an OpenMM simulation.
+
+        Arguments:
+            system: An OpenMM system
+            integrator: An OpenMM integrator
+            platform: An OpenMM platform specifying the device information
+            properties: A dictionary of properties for the platform
+            topology: An OpenMM topology object
+        Returns:
+            simulation: An OpenMM simulation object
+        """
+        simulation = Simulation(topology, system, integrator, platform, properties)
+        return simulation
+
+    def _load_or_initialize(self, system, temperature):
+        """Loads or initializes the simulation with a given system and temperature.
+
+        Arguments:
+            system: An OpenMM system
+            temperature: A float specifying the temperature in Kelvin
+        """
+        if self.count == 0:
             print("Minimizing energy")
             self.simulation.context.setPositions(system.positions)
             self.simulation.minimizeEnergy()
@@ -165,30 +265,27 @@ class OMMFF:
                 # Previous one failed, try loading old restart file
                 base_filename_old = f"{self.folder_name}_{self.count - 1}"
                 self.simulation.loadCheckpoint(f"{base_filename_old}_restart.chk")
-        # Get number of atoms in the system
-        self.num_atoms = len(system.positions)
-        print(f"Number of atoms: {self.num_atoms}")
-        reporter = HDF5Reporter(
-            f"{self.base_filename_2}_{self.internal_count}.h5", self.save_int
-        )
-        restart_reporter = CheckpointReporter(
-            f"{self.base_filename}_restart.chk", self.save_int
-        )
-        self.simulation.reporters.append(restart_reporter)
-        self.simulation.reporters.append(reporter)
-        # save initial state
         self.simulation.saveCheckpoint(f"{self.base_filename_2}_restart.chk")
         self.simulation.saveState(f"{self.base_filename_2}_restart.xml")
-        # get masses of the atoms
-        self.masses = np.array(
-            [
-                system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
-                for i in range(self.num_atoms)
-            ]
-        )
+
+    def _setup_reporters(self, save_int):
+        """Sets up the reporters for the simulation."""
+        self.save_int = save_int
+        # Set up reporters
+        self.simulation.reporters = []
+        if save_int > 0:
+            reporter = HDF5Reporter(
+                f"{self.base_filename_2}_{self.internal_count}.h5", save_int
+            )
+            restart_reporter = CheckpointReporter(
+                f"{self.base_filename}_restart.chk", save_int
+            )
+            self.simulation.reporters.append(reporter)
+            self.simulation.reporters.append(restart_reporter)
 
     def run_sim(self, steps, close_file=False):
-        """Runs self.simulation for steps steps
+        """Runs self.simulation for given number of steps.
+
         Arguments:
             steps: The number of steps to run the simulation for
             close_file: A bool to determine whether to close file. Necessary
@@ -198,21 +295,9 @@ class OMMFF:
         if close_file:
             self.simulation.reporters[1].close()
 
-    def _init_simulation(self, system, integrator, platform, properties, topology):
-        """Initializes an OpenMM simulation
-        Arguments:
-            system: An OpenMM system
-            integrator: An OpenMM integrator
-            platform: An OpenMM platform specifying the device information
-            num_beads: An int specifying the number of beads to use
-        Returns:
-            simulation: An OpenMM simulation object
-        """
-        simulation = Simulation(topology, system, integrator, platform, properties)
-        return simulation
-
     def get_information(self, as_numpy=True, enforce_periodic_box=True):
-        """Gets information (positions, forces and PE of system)
+        """Gets information (positions, forces and PE of system).
+
         Arguments:
             as_numpy: A boolean of whether to return as a numpy array
             enforce_periodic_box: A boolean of whether to enforce periodic boundary conditions
@@ -251,7 +336,7 @@ class OMMFF:
             # turn on track
             self.simulation.context.setParameter("track", 1)
             forces_metric = []
-            for i, custom_force in enumerate(self.string_forces):
+            for i, _custom_force in enumerate(self.string_forces):
                 state = self.simulation.context.getState(
                     getEnergy=True,
                     getForces=True,
@@ -296,8 +381,10 @@ class OMMFF:
         beta1=0.9,
         beta2=0.999,
     ):
-        """Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs)
-           are saved every save_freq time steps
+        """
+        Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs)
+           are saved every save_freq time steps.
+
         Arguments:
             init_pos: A numpy array of shape (n_atoms, 3) corresponding to the initial positions in Angstroms
             num_data_points: An int specifying the number of data points to generate
@@ -307,8 +394,10 @@ class OMMFF:
             tag: A string specifying the tag to save the data
             time_max: An int specifying the maximum time to run the simulation for
             precision: An int specifying the precision of the storage
-        """
-
+            burn_in: An int specifying the number of iterations to burn in before starting to update the string
+            beta1: A float specifying the beta1 parameter for the Adam optimizer
+            beta2: A float specifying the beta2 parameter for the Adam optimizer
+        """  # noqa: D205
         if tag is None:
             tag = self.base_filename
 
@@ -375,169 +464,12 @@ class OMMFF:
                 )
 
             if self.string_freq is not None:
-                if (
-                    _ % self.string_freq == 0
-                    and _ != 0
-                    and _ / self.string_freq > burn_in
-                ):
-                    # get initial parameters
-                    cvs0 = []
-                    for i in range(len(self.parameter_name)):
-                        cvs0.append(
-                            self.simulation.context.getParameter(self.parameter_name[i])
-                        )
-                    cvs0 = np.array(cvs0)
-                    cvs0_global = np.zeros((self.size, len(cvs0)))
-
-                    # Get current forces for cvs
-                    forces0 = []
-                    for i in range(len(self.parameter_force_name)):
-                        forces0.append(
-                            self.simulation.context.getParameter(
-                                self.parameter_force_name[i]
-                            )
-                        )
-                    forces0 = np.array(forces0)
-
-                    self.comm.Allgather(cvs0, cvs0_global)
-                    # average the CVs, metric
-                    # as periodic, do
-                    cvs_store_np = np.array(self.cvs_store)
-                    # subtract the initial cvs
-                    cvs_store_np -= cvs0
-                    cvs_store_np = cvs_store_np - 2 * np.pi * np.rint(
-                        cvs_store_np / (2 * np.pi)
-                    )
-                    mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
-                    mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
-                    cvs_diff = np.arctan2(mean_cvs_y, mean_cvs_x)
-                    cvs_diff *= forces0
-                    metric = np.mean(self.metric_store, axis=0)
-                    inv_metric = np.linalg.inv(metric)
-                    if self.rank == 0 or self.rank == self.size - 1:
-                        metric = np.ones_like(metric)
-                    grad = -metric @ cvs_diff
-                    projection = np.eye(len(cvs_diff))
-                    pos_diff = None
-                    pos_diff_size = None
-                    pos_diff_grad = None
-                    neg_diff = None
-                    neg_diff_size = None
-                    if self.rank < self.size - 1:
-                        pos_diff = cvs0_global[self.rank + 1] - cvs0
-                        pos_diff -= 2 * np.pi * np.rint(pos_diff / (2 * np.pi))
-                        pos_diff_size = np.linalg.norm(pos_diff)
-                        pos_diff_grad = np.dot(pos_diff, grad)
-                    if self.rank > 0:
-                        neg_diff = cvs0_global[self.rank - 1] - cvs0
-                        neg_diff -= 2 * np.pi * np.rint(neg_diff / (2 * np.pi))
-                        neg_diff_size = np.linalg.norm(neg_diff)
-                    if pos_diff is not None and neg_diff is not None:
-                        if pos_diff_grad >= 0:
-                            projection -= (
-                                np.outer(pos_diff, pos_diff) / pos_diff_size**2
-                            )
-                        else:
-                            projection -= (
-                                np.outer(neg_diff, neg_diff) / neg_diff_size**2
-                            )
-                    grad = projection @ grad
-                    if not self.update_ends:
-                        if self.rank == 0 or self.rank == self.size - 1:
-                            grad = np.zeros_like(grad)
-                    grad = self.adam.update(grad)
-                    # String method communication steps
-                    if self.comm is not None:
-                        cv_global = np.zeros((self.size, len(cvs0)))
-                        inv_metric_global = np.zeros((self.size, len(cvs0), len(cvs0)))
-                        grad_global = np.zeros((self.size, len(cvs0)))
-                        self.comm.Allgather(cvs0, cv_global)
-                        self.comm.Allgather(grad, grad_global)
-                        self.comm.Allgather(inv_metric, inv_metric_global)
-                        if self.rank == 0:
-                            # interpolate the string, and update the parameters
-                            cv_global_pre = cv_global.copy()
-                            t = np.linspace(0, 1, self.size)
-                            for i in range(1, self.size):
-                                for j in range(len(cvs0)):
-                                    if cv_global[i, j] - cv_global[i - 1, j] > np.pi:
-                                        cv_global[i:, j] = cv_global[i:, j] - 2 * np.pi
-                                    elif cv_global[i, j] - cv_global[i - 1, j] < -np.pi:
-                                        cv_global[i:, j] = cv_global[i:, j] + 2 * np.pi
-                            # Thomas algorithm
-                            cv_global = ThomasInverse_batch_d(
-                                self.a_vec,
-                                self.b_vec,
-                                self.c_vec,
-                                cv_global - grad_global,
-                            )
-                            # choose new t-values such that the string is equally spaced in CV-space
-                            arc_length = np.zeros(self.size)
-                            delta_cv = cv_global[1:] - cv_global[:-1]
-                            if self.cv_weights is None:
-                                segment_lengths = np.sqrt(
-                                    np.einsum(
-                                        "ni,nij,nj->n",
-                                        delta_cv,
-                                        inv_metric_global[:-1],
-                                        delta_cv,
-                                    )
-                                )
-                            else:
-                                delta_cv *= self.cv_weights[np.newaxis, :]
-                                segment_lengths = np.linalg.norm(delta_cv, axis=1)
-                            arc_length[1:] = np.cumsum(segment_lengths)
-                            arc_length /= arc_length[-1]
-                            equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
-                            t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
-                            cv_global = interp1d(t, cv_global, axis=0, kind="linear")(
-                                t_equal
-                            )
-                            # convert back to being in the range of -pi to pi
-                            cv_global = cv_global - 2 * np.pi * np.rint(
-                                cv_global / (2 * np.pi)
-                            )
-                            print(cv_global)
-                            h5_string.create_group(f"config_{string_count}")
-                            h5_string[f"config_{string_count}"].create_dataset(
-                                "cvs",
-                                data=cv_global,
-                                dtype=np.float64,
-                            )
-                            h5_string[f"config_{string_count}"].create_dataset(
-                                "cvs_pre",
-                                data=cv_global_pre,
-                                dtype=np.float64,
-                            )
-                            h5_string[f"config_{string_count}"].create_dataset(
-                                "inv_metric",
-                                data=inv_metric_global,
-                                dtype=np.float64,
-                            )
-                            h5_string[f"config_{string_count}"].create_dataset(
-                                "internal_count",
-                                data=self.internal_count,
-                                dtype=int,
-                            )
-                            h5_string[f"config_{string_count}"].create_dataset(
-                                "grad",
-                                data=grad_global,
-                                dtype=np.float64,
-                            )
-                            string_count += 1
-                            self.comm.Scatter(cv_global, cvs0, root=0)
-                        else:
-                            self.comm.Scatter(cv_global, cvs0, root=0)
-
-                    for i in range(len(self.parameter_name)):
-                        self.simulation.context.setParameter(
-                            self.parameter_name[i], cvs0[i]
-                        )
-                    self.cvs_store = []
-                    self.metric_store = []
-                elif _ % self.string_freq == 0 and _ / self.string_freq <= burn_in:
-                    self.cvs_store = []
-                    self.metric_store = []
+                string_count = self._handle_string_method_update(
+                    _,
+                    burn_in,
+                    string_count,
+                    h5_string,
+                )
 
             # End timer
             time_end = time.time()
@@ -552,8 +484,254 @@ class OMMFF:
         h5_file.early_close()
         h5_string.close()
 
+    def _should_update_string(self, iteration, burn_in):
+        """Check if string should be updated at this iteration."""
+        return (
+            iteration % self.string_freq == 0
+            and iteration != 0
+            and iteration / self.string_freq > burn_in
+        )
+
+    def _should_reset_storage(self, iteration, burn_in):
+        """Check if storage should be reset during burn-in."""
+        return (
+            iteration % self.string_freq == 0
+            and iteration / self.string_freq <= burn_in
+        )
+
+    def _collect_current_cvs_and_forces(self):
+        """Collect current CV values and forces from simulation context."""
+        cvs0 = []
+        for i in range(len(self.parameter_name)):
+            cvs0.append(self.simulation.context.getParameter(self.parameter_name[i]))
+        cvs0 = np.array(cvs0)
+
+        forces0 = []
+        for i in range(len(self.parameter_force_name)):
+            forces0.append(
+                self.simulation.context.getParameter(self.parameter_force_name[i])
+            )
+        forces0 = np.array(forces0)
+
+        return cvs0, forces0
+
+    def _process_cv_statistics(self, cvs0, forces0):
+        """Process CV statistics with periodic boundary conditions."""
+        cvs_store_np = np.array(self.cvs_store)
+        cvs_store_np -= cvs0
+        cvs_store_np = cvs_store_np - 2 * np.pi * np.rint(cvs_store_np / (2 * np.pi))
+
+        mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
+        mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
+        cvs_diff = np.arctan2(mean_cvs_x, mean_cvs_y)
+        cvs_diff *= forces0
+
+        metric = np.mean(self.metric_store, axis=0)
+        inv_metric = np.linalg.inv(metric)
+
+        return cvs_diff, metric, inv_metric
+
+    def _calculate_gradient_with_projection(self, cvs0, cvs_diff, metric):
+        """Calculate gradient with projection for string method."""
+        cvs0_global = np.zeros((self.size, len(cvs0)))
+        self.comm.Allgather(cvs0, cvs0_global)
+
+        if self.rank == 0 or self.rank == self.size - 1:
+            metric = np.ones_like(metric)
+
+        grad = -metric @ cvs_diff
+        projection = np.eye(len(cvs_diff))
+
+        # Calculate neighboring differences
+        pos_diff = None
+        pos_diff_grad = None
+        neg_diff = None
+
+        if self.rank < self.size - 1:
+            pos_diff = cvs0_global[self.rank + 1] - cvs0
+            pos_diff -= 2 * np.pi * np.rint(pos_diff / (2 * np.pi))
+            pos_diff_size = np.linalg.norm(pos_diff)
+            pos_diff_grad = np.dot(pos_diff, grad)
+
+        if self.rank > 0:
+            neg_diff = cvs0_global[self.rank - 1] - cvs0
+            neg_diff -= 2 * np.pi * np.rint(neg_diff / (2 * np.pi))
+            neg_diff_size = np.linalg.norm(neg_diff)
+
+        # Apply projection based on gradient direction
+        if pos_diff is not None and neg_diff is not None:
+            if pos_diff_grad >= 0:
+                projection -= np.outer(pos_diff, pos_diff) / pos_diff_size**2
+            else:
+                projection -= np.outer(neg_diff, neg_diff) / neg_diff_size**2
+
+        grad = projection @ grad
+
+        if not self.update_ends:
+            if self.rank == 0 or self.rank == self.size - 1:
+                grad = np.zeros_like(grad)
+
+        return self.adam.update(grad), cvs0_global
+
+    def _communicate_and_interpolate_string(
+        self, cvs0, grad, inv_metric, string_count, h5_string
+    ):
+        """Handle MPI communication and string interpolation."""
+        if self.comm is None:
+            return cvs0
+
+        cv_global = np.zeros((self.size, len(cvs0)))
+        inv_metric_global = np.zeros((self.size, len(cvs0), len(cvs0)))
+        grad_global = np.zeros((self.size, len(cvs0)))
+
+        self.comm.Allgather(cvs0, cv_global)
+        self.comm.Allgather(grad, grad_global)
+        self.comm.Allgather(inv_metric, inv_metric_global)
+
+        if self.rank == 0:
+            cv_global = self._interpolate_string_on_root(
+                cv_global, grad_global, inv_metric_global, string_count, h5_string
+            )
+            self.comm.Scatter(cv_global, cvs0, root=0)
+        else:
+            self.comm.Scatter(cv_global, cvs0, root=0)
+
+        return cvs0
+
+    def _interpolate_string_on_root(
+        self, cv_global, grad_global, inv_metric_global, string_count, h5_string
+    ):
+        """Perform string interpolation on root process."""
+        cv_global_pre = cv_global.copy()
+        t = np.linspace(0, 1, self.size)
+
+        # Handle periodic boundary conditions
+        for i in range(1, self.size):
+            for j in range(len(cv_global[0])):
+                if cv_global[i, j] - cv_global[i - 1, j] > np.pi:
+                    cv_global[i:, j] = cv_global[i:, j] - 2 * np.pi
+                elif cv_global[i, j] - cv_global[i - 1, j] < -np.pi:
+                    cv_global[i:, j] = cv_global[i:, j] + 2 * np.pi
+
+        # Thomas algorithm
+        cv_global = thomas_inverse_batch_d(
+            self.a_vec,
+            self.b_vec,
+            self.c_vec,
+            cv_global - grad_global,
+        )
+
+        # Equal spacing in CV-space
+        cv_global = self._apply_equal_spacing(cv_global, inv_metric_global, t)
+
+        # Convert back to [-pi, pi] range
+        cv_global = cv_global - 2 * np.pi * np.rint(cv_global / (2 * np.pi))
+
+        print(cv_global)
+        self._save_string_data(
+            cv_global,
+            cv_global_pre,
+            inv_metric_global,
+            grad_global,
+            string_count,
+            h5_string,
+        )
+
+        return cv_global
+
+    def _apply_equal_spacing(self, cv_global, inv_metric_global, t):
+        """Apply equal spacing to the string in CV-space."""
+        arc_length = np.zeros(self.size)
+        delta_cv = cv_global[1:] - cv_global[:-1]
+
+        if self.cv_weights is None:
+            segment_lengths = np.sqrt(
+                np.einsum(
+                    "ni,nij,nj->n",
+                    delta_cv,
+                    inv_metric_global[:-1],
+                    delta_cv,
+                )
+            )
+        else:
+            delta_cv *= self.cv_weights[np.newaxis, :]
+            segment_lengths = np.linalg.norm(delta_cv, axis=1)
+
+        arc_length[1:] = np.cumsum(segment_lengths)
+        arc_length /= arc_length[-1]
+        equal_spaced_arc_lengths = np.linspace(0, 1, self.size)
+        t_equal = np.interp(equal_spaced_arc_lengths, arc_length, t)
+
+        return interp1d(t, cv_global, axis=0, kind="linear")(t_equal)
+
+    def _save_string_data(
+        self,
+        cv_global,
+        cv_global_pre,
+        inv_metric_global,
+        grad_global,
+        string_count,
+        h5_string,
+    ):
+        """Save string data to HDF5 file."""
+        h5_string.create_group(f"config_{string_count}")
+        h5_string[f"config_{string_count}"].create_dataset(
+            "cvs", data=cv_global, dtype=np.float64
+        )
+        h5_string[f"config_{string_count}"].create_dataset(
+            "cvs_pre", data=cv_global_pre, dtype=np.float64
+        )
+        h5_string[f"config_{string_count}"].create_dataset(
+            "inv_metric", data=inv_metric_global, dtype=np.float64
+        )
+        h5_string[f"config_{string_count}"].create_dataset(
+            "internal_count", data=self.internal_count, dtype=int
+        )
+        h5_string[f"config_{string_count}"].create_dataset(
+            "grad", data=grad_global, dtype=np.float64
+        )
+
+    def _update_simulation_parameters(self, cvs0):
+        """Update simulation parameters with new CV values."""
+        for i in range(len(self.parameter_name)):
+            self.simulation.context.setParameter(self.parameter_name[i], cvs0[i])
+
+    def _handle_string_method_update(self, iteration, burn_in, string_count, h5_string):
+        """Handle string method updates during trajectory generation."""
+        if self._should_update_string(iteration, burn_in):
+            # Collect current state
+            cvs0, forces0 = self._collect_current_cvs_and_forces()
+
+            # Process statistics
+            cvs_diff, metric, inv_metric = self._process_cv_statistics(cvs0, forces0)
+
+            # Calculate gradient
+            grad, _ = self._calculate_gradient_with_projection(cvs0, cvs_diff, metric)
+
+            # Communicate and interpolate
+            cvs0 = self._communicate_and_interpolate_string(
+                cvs0, grad, inv_metric, string_count, h5_string
+            )
+
+            # Update parameters
+            self._update_simulation_parameters(cvs0)
+
+            # Reset storage
+            self.cvs_store = []
+            self.metric_store = []
+
+            return string_count + 1
+
+        elif self._should_reset_storage(iteration, burn_in):
+            self.cvs_store = []
+            self.metric_store = []
+
+        return string_count
+
 
 class Adam:
+    """Adam optimizer for updating parameters."""
+
     def __init__(self, lr=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
         self.lr = lr
         self.beta1 = beta1
@@ -564,6 +742,7 @@ class Adam:
         self.t = 0
 
     def update(self, grads):
+        """Returns gradient for parameter optimization using Adam."""
         if self.m is None:
             self.m = np.zeros_like(grads)
             self.v = np.zeros_like(grads)
@@ -579,17 +758,23 @@ class Adam:
 
 
 @numba.njit(cache=True, parallel=True)
-def ThomasInverse_batch_d(a, b, c, d):
+def thomas_inverse_batch_d(a, b, c, d):
     """
     Solves a batch of tridiagonal systems Ax=d, where A is the same for
     all systems but d varies.
-    """
+
+    Arguments:
+        a: A 1D numpy array of shape (n-1,) corresponding to the sub-diagonal of the tridiagonal matrix
+        b: A 1D numpy array of shape (n,) corresponding to the diagonal of the tridiagonal matrix
+        c: A 1D numpy array of shape (n-1,) corresponding to the super-diagonal of the tridiagonal matrix
+        d: A 2D numpy array of shape (n, b) where n is the number of equations and b is the batch size
+    """  # noqa: D205
     n = b.shape[0]
-    B = d.shape[1]  # Batch size
+    b = d.shape[1]  # Batch size
 
     c_prime = np.zeros(n - 1, dtype=np.float64)
-    d_prime = np.zeros((n, B), dtype=np.float64)
-    x = np.zeros((n, B), dtype=np.float64)
+    d_prime = np.zeros((n, b), dtype=np.float64)
+    x = np.zeros((n, b), dtype=np.float64)
 
     # --- Forward elimination ---
     b0_inv = 1.0 / b[0]

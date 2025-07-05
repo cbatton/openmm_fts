@@ -1,3 +1,5 @@
+"""OpenMM interface for doing Hamiltonian replica exchange simulations."""
+
 import time
 from pathlib import Path
 
@@ -26,9 +28,7 @@ from traj_writer import TrajWriter
 
 
 class OMMFF:
-    """
-    OMM Interface with a given system
-    """
+    """OMM Interface with a given system."""
 
     def __init__(
         self,
@@ -48,25 +48,60 @@ class OMMFF:
         force_groups=None,
         parameter_name=None,
         parameter_force_name=None,
-        plumed_force=None,
         comm=None,
         swap_scheme="mixing",
     ):
+        self._setup_filenames_and_count(folder_name)
+        self._initialize_system_forces(
+            system,
+            velocities_com,
+            custom_forces,
+            string_forces,
+        )
+        self.force_groups = force_groups
+        self.parameter_name = parameter_name
+        self.parameter_force_name = parameter_force_name
+        self.comm = comm
+        if self.comm is not None:
+            self.rank = self.comm.Get_rank()
+            self.size = self.comm.Get_size()
+
+        integrator = self._create_integrator(
+            integrator_name,
+            temperature,
+            friction,
+            time_step,
+            seed,
+        )
+        self._initialize_simulation(
+            system,
+            integrator,
+            platform,
+            precision,
+            system.topology,
+        )
+        self._load_or_initialize(system, temperature)
+        self._setup_reporters(save_int)
+        self._setup_swap_scheme(swap_scheme, temperature)
+        self.num_atoms = len(system.positions)
+
+    def _setup_filenames_and_count(self, folder_name):
+        """Sets up the filenames and count for the simulation."""
         self.folder_name = folder_name
         self.base_filename = f"{self.folder_name}"
-        print(f"Base filename: {self.base_filename}")
-        # Get count from a count file if it exists, otherwise set to 0
         count_file = Path(f"{self.base_filename}_count.txt")
         if count_file.exists():
-            count = int(np.loadtxt(count_file) + 1)
-            np.savetxt(count_file, [count], fmt="%d")
+            self.count = int(np.loadtxt(count_file) + 1)
         else:
-            count = 0
-            np.savetxt(count_file, [count], fmt="%d")
-        self.count = count
+            self.count = 0
+        np.savetxt(count_file, [self.count], fmt="%d")
         self.base_filename_2 = f"{self.folder_name}_{self.count}"
         self.internal_count = 0
-        self.save_int = save_int
+
+    def _initialize_system_forces(
+        self, system, velocities_com, custom_forces, string_forces
+    ):
+        """Initializes the system forces for the simulation."""
         if velocities_com:
             system.system.addForce(CMMotionRemover())
         if custom_forces is not None:
@@ -83,46 +118,72 @@ class OMMFF:
             self.cvs_store = []
             self.metric_store = []
         self.string_forces = string_forces
-        self.force_groups = force_groups
-        self.parameter_name = parameter_name
-        self.parameter_force_name = parameter_force_name
-        self.comm = comm
-        if self.comm is not None:
-            self.rank = self.comm.Get_rank()
-            self.size = self.comm.Get_size()
-        if (
-            integrator_name == "csvr_leapfrog"
-            or integrator_name == "csvr_leapfrog_end"
-            or integrator_name == "csvr_verlet"
-            or integrator_name == "csvr_verlet_end"
-        ):
-            # Remove csvr_ from integrator name, and set integrator
-            integrator_name = integrator_name[5:]
+
+    def _create_integrator(
+        self, integrator_name, temperature, friction, time_step, seed
+    ):
+        """Creates an OpenMM integrator based on the given parameters."""
+        if integrator_name == "csvr_leapfrog":
             integrator = CSVRIntegrator(
-                system=system.system,
+                system=self.simulation.system,
                 temperature=temperature,
                 tau=friction,
                 timestep=time_step,
-                scheme=integrator_name,
+                scheme="leapfrog",
             )
-            integrator.setRandomNumberSeed(seed)
+        elif integrator_name == "csvr_leapfrog_end":
+            integrator = CSVRIntegrator(
+                system=self.simulation.system,
+                temperature=temperature,
+                tau=friction,
+                timestep=time_step,
+                scheme="leapfrog_end",
+            )
+        elif integrator_name == "csvr_verlet":
+            integrator = CSVRIntegrator(
+                system=self.simulation.system,
+                temperature=temperature,
+                tau=friction,
+                timestep=time_step,
+                scheme="verlet",
+            )
+        elif integrator_name == "csvr_verlet_end":
+            integrator = CSVRIntegrator(
+                system=self.simulation.system,
+                temperature=temperature,
+                tau=friction,
+                timestep=time_step,
+                scheme="verlet_end",
+            )
         elif integrator_name == "langevin":
             integrator = LangevinMiddleIntegrator(
                 temperature,
                 friction,
                 time_step,
             )
-            integrator.setRandomNumberSeed(seed)
         elif integrator_name == "brownian":
             integrator = BrownianIntegrator(
                 temperature,
                 friction,
                 time_step,
             )
-            integrator.setRandomNumberSeed(seed)
         else:
             raise ValueError("Integrator name not recognized")
+        integrator.setRandomNumberSeed(seed)
+        return integrator
 
+    def _initialize_simulation(self, system, integrator, platform, precision, topology):
+        """Initializes an OpenMM simulation.
+
+        Arguments:
+            system: An OpenMM system
+            integrator: An OpenMM integrator
+            platform: An OpenMM platform specifying the device information
+            precision: A string specifying the precision of the simulation
+            topology: An OpenMM topology object
+        Returns:
+            simulation: An OpenMM simulation object
+        """
         platform = Platform.getPlatformByName(platform)
         properties = {}
         if platform == "CUDA":
@@ -130,14 +191,37 @@ class OMMFF:
         elif platform == "CPU":
             properties = {"Threads": "1"}
 
-        # Set up plumed if using
-        if plumed_force is not None:
-            system.system.addForce(plumed_force)
-
         self.simulation = self._init_simulation(
-            system.system, integrator, platform, properties, system.topology
+            system,
+            integrator,
+            platform,
+            properties,
+            topology,
         )
-        if count == 0:
+
+    def _init_simulation(self, system, integrator, platform, properties, topology):
+        """Initializes an OpenMM simulation.
+
+        Arguments:
+            system: An OpenMM system
+            integrator: An OpenMM integrator
+            platform: An OpenMM platform specifying the device information
+            properties: A dictionary of properties for the platform
+            topology: An OpenMM topology object
+        Returns:
+            simulation: An OpenMM simulation object
+        """
+        simulation = Simulation(topology, system, integrator, platform, properties)
+        return simulation
+
+    def _load_or_initialize(self, system, temperature):
+        """Loads or initializes the simulation with a given system and temperature.
+
+        Arguments:
+            system: An OpenMM system
+            temperature: A float specifying the temperature in Kelvin
+        """
+        if self.count == 0:
             print("Minimizing energy")
             self.simulation.context.setPositions(system.positions)
             self.simulation.minimizeEnergy()
@@ -149,23 +233,26 @@ class OMMFF:
                 # Previous one failed, try loading old restart file
                 base_filename_old = f"{self.folder_name}_{self.count - 1}"
                 self.simulation.loadCheckpoint(f"{base_filename_old}_restart.chk")
-        # Get number of atoms in the system
-        self.num_atoms = len(system.positions)
-        print(f"Number of atoms: {self.num_atoms}")
-        reporter = HDF5Reporter(
-            f"{self.base_filename_2}_{self.internal_count}.h5", self.save_int
-        )
-        restart_reporter = CheckpointReporter(
-            f"{self.base_filename}_restart.chk", self.save_int
-        )
-        self.simulation.reporters.append(restart_reporter)
-        self.simulation.reporters.append(reporter)
-        # save initial state
         self.simulation.saveCheckpoint(f"{self.base_filename_2}_restart.chk")
         self.simulation.saveState(f"{self.base_filename_2}_restart.xml")
-        # replica exchange info
-        # should collect all information needed to do it
-        # Validate swap_scheme
+
+    def _setup_reporters(self, save_int):
+        """Sets up the reporters for the simulation."""
+        self.save_int = save_int
+        # Set up reporters
+        self.simulation.reporters = []
+        if save_int > 0:
+            reporter = HDF5Reporter(
+                f"{self.base_filename_2}_{self.internal_count}.h5", save_int
+            )
+            restart_reporter = CheckpointReporter(
+                f"{self.base_filename}_restart.chk", save_int
+            )
+            self.simulation.reporters.append(reporter)
+            self.simulation.reporters.append(restart_reporter)
+
+    def _setup_swap_scheme(self, swap_scheme, temperature):
+        """Sets up the swap scheme for the simulation."""
         if swap_scheme not in ["mixing", "neighbors"]:
             raise ValueError(
                 f"swap_scheme must be 'mixing' or 'neighbors', got '{swap_scheme}'"
@@ -175,42 +262,32 @@ class OMMFF:
         self.beta = self.beta.value_in_unit_system(md_unit_system)
         if self.comm is not None:
             self.nswap_attemps = self.size**3
-            self.parameter_values_rank = np.zeros(len(parameter_name), dtype=np.float64)
-            self.force_values_rank = np.zeros(
-                len(parameter_force_name), dtype=np.float64
+            self.parameter_values_rank = np.zeros(
+                len(self.parameter_name), dtype=np.float64
             )
-            for i, name in enumerate(parameter_name):
+            self.force_values_rank = np.zeros(
+                len(self.parameter_force_name), dtype=np.float64
+            )
+            for i, name in enumerate(self.parameter_name):
                 self.parameter_values_rank[i] = self.simulation.context.getParameter(
                     name
                 )
-            for i, name in enumerate(parameter_force_name):
+            for i, name in enumerate(self.parameter_force_name):
                 self.force_values_rank[i] = self.simulation.context.getParameter(name)
             self.parameter_values = np.zeros(
-                (self.size, len(parameter_name)), dtype=np.float64
+                (self.size, len(self.parameter_name)), dtype=np.float64
             )
             self.force_values = np.zeros(
-                (self.size, len(parameter_force_name)), dtype=np.float64
+                (self.size, len(self.parameter_force_name)), dtype=np.float64
             )
             # use MPI to get all parameter values
             self.comm.Allgather(self.parameter_values_rank, self.parameter_values)
             self.comm.Allgather(self.force_values_rank, self.force_values)
-            self.replica_rank = self.rank
-            if self.rank == 0:
-                self.num_attempted = None
-                self.num_accepted = None
-                print(f"Parameter values: {self.parameter_values}")
-                print(f"Force values: {self.force_values}")
-                print("Beta value:", self.beta)
-            # should have something here to handle restarting
-            # as not necessarily the case the initial values are what they should be
-            # check if replica_ranks file exists
             if Path("replica_ranks.h5").exists():
                 with h5py.File("replica_ranks.h5", "r") as f:
                     # get the last config
                     replica_rank_new = f[list(f.keys())[-1]][:]
                     self.replica_rank = replica_rank_new[self.rank]
-                    print(f"Replica rank loaded: {self.rank} {self.replica_rank}")
-                    # set the context parameters to the correct values
                     for i, name in enumerate(self.parameter_name):
                         self.simulation.context.setParameter(
                             name, self.parameter_values[self.replica_rank, i]
@@ -221,7 +298,8 @@ class OMMFF:
                         )
 
     def run_sim(self, steps, close_file=False):
-        """Runs self.simulation for steps steps
+        """Runs self.simulation for given number of steps.
+
         Arguments:
             steps: The number of steps to run the simulation for
             close_file: A bool to determine whether to close file. Necessary
@@ -231,21 +309,9 @@ class OMMFF:
         if close_file:
             self.simulation.reporters[1].close()
 
-    def _init_simulation(self, system, integrator, platform, properties, topology):
-        """Initializes an OpenMM simulation
-        Arguments:
-            system: An OpenMM system
-            integrator: An OpenMM integrator
-            platform: An OpenMM platform specifying the device information
-            num_beads: An int specifying the number of beads to use
-        Returns:
-            simulation: An OpenMM simulation object
-        """
-        simulation = Simulation(topology, system, integrator, platform, properties)
-        return simulation
-
     def get_information(self, as_numpy=True, enforce_periodic_box=True):
-        """Gets information (positions, forces and PE of system)
+        """Gets information (positions, forces and PE of system).
+
         Arguments:
             as_numpy: A boolean of whether to return as a numpy array
             enforce_periodic_box: A boolean of whether to enforce periodic boundary conditions
@@ -312,8 +378,8 @@ class OMMFF:
         burn_in=1,
         swap_freq=1,
     ):
-        """Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs)
-           are saved every save_freq time steps
+        """Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs) are saved every save_freq time steps.
+
         Arguments:
             init_pos: A numpy array of shape (n_atoms, 3) corresponding to the initial positions in Angstroms
             num_data_points: An int specifying the number of data points to generate
@@ -323,8 +389,9 @@ class OMMFF:
             tag: A string specifying the tag to save the data
             time_max: An int specifying the maximum time to run the simulation for
             precision: An int specifying the precision of the storage
+            burn_in: An int specifying the number of initial steps to burn in before swapping
+            swap_freq: An int specifying the frequency to swap replicas
         """
-
         if tag is None:
             tag = self.base_filename
 
@@ -369,89 +436,7 @@ class OMMFF:
             f.close()
 
             if _ % swap_freq == 0 and self.comm is not None and _ != 0:
-                # get all cvs, then evaluate probability of swapping
-                cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
-                # use MPI to get all cvs
-                self.comm.Allgather(cvs, cvs_all)
-                # get current replica_rank
-                replica_rank_all = np.zeros(self.size, dtype=np.int64)
-                self.comm.Allgather(
-                    np.array(self.replica_rank, dtype=np.int64), replica_rank_all
-                )
-                # swap
-                if self.rank == 0:
-                    if self.swap_scheme == "neighbors":
-                        replica_rank_new, num_accepted, num_attempted = (
-                            mix_neighboring_replicas(
-                                self.beta,
-                                cvs_all,
-                                self.parameter_values,
-                                self.force_values,
-                                replica_rank_all,
-                            )
-                        )
-                    elif self.swap_scheme == "mixing":
-                        replica_rank_new, num_accepted, num_attempted = mix_replicas(
-                            self.beta,
-                            cvs_all,
-                            self.parameter_values,
-                            self.force_values,
-                            replica_rank_all,
-                            self.nswap_attemps,
-                        )
-                    if self.num_attempted is None:
-                        self.num_attempted = num_attempted
-                        self.num_accepted = num_accepted
-                    else:
-                        self.num_attempted += num_attempted
-                        self.num_accepted += num_accepted
-                    print(f"Replica rank: {replica_rank_new}")
-                    print(f"Number of accepted swaps: {self.num_accepted}")
-                    print(f"Number of attempted swaps: {self.num_attempted}")
-                else:
-                    replica_rank_new = np.zeros(self.size, dtype=np.int64)
-                # communicate the new replica rank
-                self.comm.Bcast(replica_rank_new, root=0)
-                if replica_rank_new[self.rank] != self.replica_rank:
-                    # update the context parameters
-                    for i, name in enumerate(self.parameter_name):
-                        self.simulation.context.setParameter(
-                            name, self.parameter_values[replica_rank_new[self.rank], i]
-                        )
-                    for i, name in enumerate(self.parameter_force_name):
-                        self.simulation.context.setParameter(
-                            name, self.force_values[replica_rank_new[self.rank], i]
-                        )
-                self.replica_rank = replica_rank_new[self.rank]
-                # save a top level file with replica ranks, swap rates
-                if self.rank == 0:
-                    with h5py.File("replica_ranks.h5", "a") as f:
-                        # keep appending to it
-                        if len(f.keys()) == 0:
-                            f.create_dataset(
-                                f"config_{self.count}_{len(f.keys())}",
-                                data=replica_rank_new,
-                            )
-                        else:
-                            dset_name = f"config_{self.count}_{len(f.keys())}"
-                            f.create_dataset(dset_name, data=replica_rank_new)
-                    with h5py.File("swap_rates.h5", "a") as f:
-                        if len(f.keys()) == 0:
-                            group = f.create_group(
-                                f"config_{self.count}_{len(f.keys())}"
-                            )
-                            group.create_dataset("num_accepted", data=self.num_accepted)
-                            group.create_dataset(
-                                "num_attempted", data=self.num_attempted
-                            )
-                        else:
-                            group = f.create_group(
-                                f"config_{self.count}_{len(f.keys())}"
-                            )
-                            group.create_dataset("num_accepted", data=self.num_accepted)
-                            group.create_dataset(
-                                "num_attempted", data=self.num_attempted
-                            )
+                self._perform_replica_swap(cvs)
 
             h5_file.write_frame(
                 positions,
@@ -492,6 +477,100 @@ class OMMFF:
         self.simulation.reporters[1].close()
         h5_file.early_close()
 
+    def _gather_replica_data(self, cvs):
+        """Gather collective variables and replica ranks from all processes."""
+        cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
+        self.comm.Allgather(cvs, cvs_all)
+
+        replica_rank_all = np.zeros(self.size, dtype=np.int64)
+        self.comm.Allgather(
+            np.array(self.replica_rank, dtype=np.int64), replica_rank_all
+        )
+
+        return cvs_all, replica_rank_all
+
+    def _update_replica_parameters(self, replica_rank_new):
+        """Update simulation context parameters based on new replica assignment."""
+        if replica_rank_new[self.rank] != self.replica_rank:
+            for i, name in enumerate(self.parameter_name):
+                self.simulation.context.setParameter(
+                    name, self.parameter_values[replica_rank_new[self.rank], i]
+                )
+            for i, name in enumerate(self.parameter_force_name):
+                self.simulation.context.setParameter(
+                    name, self.force_values[replica_rank_new[self.rank], i]
+                )
+        self.replica_rank = replica_rank_new[self.rank]
+
+    def _save_swap_results(self, replica_rank_new):
+        """Save replica ranks and swap rates to HDF5 files."""
+        with h5py.File("replica_ranks.h5", "a") as f:
+            if len(f.keys()) == 0:
+                f.create_dataset(
+                    f"config_{self.count}_{len(f.keys())}",
+                    data=replica_rank_new,
+                )
+            else:
+                dset_name = f"config_{self.count}_{len(f.keys())}"
+                f.create_dataset(dset_name, data=replica_rank_new)
+
+        with h5py.File("swap_rates.h5", "a") as f:
+            if len(f.keys()) == 0:
+                group = f.create_group(f"config_{self.count}_{len(f.keys())}")
+                group.create_dataset("num_accepted", data=self.num_accepted)
+                group.create_dataset("num_attempted", data=self.num_attempted)
+            else:
+                group = f.create_group(f"config_{self.count}_{len(f.keys())}")
+                group.create_dataset("num_accepted", data=self.num_accepted)
+                group.create_dataset("num_attempted", data=self.num_attempted)
+
+    def _perform_replica_swap(self, cvs):
+        """Perform replica exchange swap attempt."""
+        cvs_all, replica_rank_all = self._gather_replica_data(cvs)
+
+        if self.rank == 0:
+            if self.swap_scheme == "neighbors":
+                replica_rank_new, num_accepted, num_attempted = (
+                    mix_neighboring_replicas(
+                        self.beta,
+                        cvs_all,
+                        self.parameter_values,
+                        self.force_values,
+                        replica_rank_all,
+                    )
+                )
+            elif self.swap_scheme == "mixing":
+                replica_rank_new, num_accepted, num_attempted = mix_replicas(
+                    self.beta,
+                    cvs_all,
+                    self.parameter_values,
+                    self.force_values,
+                    replica_rank_all,
+                    self.nswap_attemps,
+                )
+
+            if self.num_attempted is None:
+                self.num_attempted = num_attempted
+                self.num_accepted = num_accepted
+            else:
+                self.num_attempted += num_attempted
+                self.num_accepted += num_accepted
+
+            print(f"Replica rank: {replica_rank_new}")
+            print(f"Number of accepted swaps: {self.num_accepted}")
+            print(f"Number of attempted swaps: {self.num_attempted}")
+        else:
+            replica_rank_new = np.zeros(self.size, dtype=np.int64)
+
+        # Broadcast the new replica rank to all processes
+        self.comm.Bcast(replica_rank_new, root=0)
+
+        # Update parameters and save results
+        self._update_replica_parameters(replica_rank_new)
+
+        if self.rank == 0:
+            self._save_swap_results(replica_rank_new)
+
 
 @numba.njit
 def mix_replicas(
@@ -502,7 +581,8 @@ def mix_replicas(
     replica_rank,
     nswap_attemps,
 ):
-    """Mixes replicas based on the Metropolis criterion
+    """Mixes replicas based on the Metropolis criterion.
+
     Arguments:
         beta: A float corresponding to the inverse temperature
         cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
@@ -515,7 +595,6 @@ def mix_replicas(
         num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
         num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
     """
-
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]
     energy_ij_store = np.zeros((n_replicas, n_replicas), dtype=np.float64)
@@ -569,7 +648,8 @@ def mix_neighboring_replicas(
     force_values,
     replica_rank,
 ):
-    """Mixes replicas based on the Metropolis criterion
+    """Mixes replicas based on the Metropolis criterion.
+
     Arguments:
         beta: A float corresponding to the inverse temperature
         cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
@@ -582,7 +662,6 @@ def mix_neighboring_replicas(
         num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
         num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
     """
-
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]
     energy_ij_store = np.zeros((n_replicas, n_replicas), dtype=np.float64)

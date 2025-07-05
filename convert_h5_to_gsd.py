@@ -1,3 +1,5 @@
+"""Convert custom .h5 files to .gsd format."""
+
 import argparse
 import glob
 import re
@@ -9,6 +11,7 @@ import numpy as np
 
 
 def boolean_string(s):
+    """Convert a string to a boolean value."""
     if s not in {"False", "True", "false", "true"}:
         raise ValueError("Not a valid boolean string")
     return s == "True" or s == "true"
@@ -30,10 +33,12 @@ files = glob.glob(f"{files_to_convert}*.h5")
 files = [file for file in files if "data" not in file]
 
 
-# perform a natural sort
-def natural_sort(l):
-    convert = lambda text: int(text) if text.isdigit() else text.lower()
-    alphanum_key = lambda key: [convert(c) for c in re.split("([0-9]+)", key)]
+def natural_sort(l):  # noqa: E741
+    """Applies a natural sort to a list of strings."""
+    convert = lambda text: int(text) if text.isdigit() else text.lower()  # noqa: E731
+    alphanum_key = lambda key: [  # noqa: E731
+        convert(c) for c in re.split("([0-9]+)", key)
+    ]
     return sorted(l, key=alphanum_key)
 
 
@@ -83,7 +88,9 @@ positions -= np.rint(positions / unit_cell) * unit_cell
 # save to gsd
 gsd_file = gsd.hoomd.open("trajectory.gsd", "w")
 
+
 def create_frame(i, n_atoms, positions, elements, elements_2, unit_cell, bonds):
+    """Create a GSD frame for a given time step."""
     frame = gsd.hoomd.Frame()
     frame.configuration.step = i
     frame.configuration.dimensions = 3
@@ -105,7 +112,9 @@ def create_frame(i, n_atoms, positions, elements, elements_2, unit_cell, bonds):
 
 
 for i in range(positions.shape[0]):
-    frame = create_frame(i, n_atoms, positions[i], elements, elements_2, unit_cell, bonds)
+    frame = create_frame(
+        i, n_atoms, positions[i], elements, elements_2, unit_cell, bonds
+    )
     gsd_file.append(frame)
 
 gsd_file.close()
