@@ -14,7 +14,7 @@ from openmm import (
     Platform,
 )
 from openmm.app import CheckpointReporter, Simulation
-from openmm.unit import kelvin, md_unit_system, nanometers, picoseconds
+from openmm.unit import kelvin, kilojoule, md_unit_system, mole, nanometers, picoseconds
 from openmm_csvr.csvr import CSVRIntegrator
 from scipy.interpolate import interp1d
 
@@ -48,6 +48,8 @@ class OMMFF:
         cv_weights=None,
         update_ends=True,
         comm=None,
+        minimize_init=True,
+        minimize_intervals=None,
     ):
         self._setup_filenames_and_count(folder_name)
         self._initialize_system_forces(
@@ -68,6 +70,7 @@ class OMMFF:
             comm,
         )
         integrator = self._create_integrator(
+            system,
             integrator_name,
             temperature,
             friction,
@@ -75,6 +78,12 @@ class OMMFF:
             seed,
         )
 
+        # get number of atoms, masses of the atoms
+        self.num_atoms = len(system.positions)
+        self.masses = np.array([
+            system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
+            for i in range(self.num_atoms)
+        ])
         self._initialize_simulation(
             system,
             integrator,
@@ -82,14 +91,8 @@ class OMMFF:
             precision,
             system.topology,
         )
-        self._load_or_initialize(system, temperature)
+        self._load_or_initialize(system, temperature, minimize_init, minimize_intervals)
         self._setup_reporters(save_int)
-        # get number of atoms, masses of the atoms
-        self.num_atoms = len(system.positions)
-        self.masses = np.array([
-            system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
-            for i in range(self.num_atoms)
-        ])
 
     def _setup_filenames_and_count(self, folder_name):
         """Sets up the filenames and count for the simulation."""
@@ -152,12 +155,12 @@ class OMMFF:
         self.b_vec[-1] = 1
 
     def _create_integrator(
-        self, integrator_name, temperature, friction, time_step, seed
+        self, system, integrator_name, temperature, friction, time_step, seed
     ):
         """Creates an OpenMM integrator based on the given parameters."""
         if integrator_name == "csvr_leapfrog":
             integrator = CSVRIntegrator(
-                system=self.simulation.system,
+                system=system.system,
                 temperature=temperature,
                 tau=friction,
                 timestep=time_step,
@@ -165,7 +168,7 @@ class OMMFF:
             )
         elif integrator_name == "csvr_leapfrog_end":
             integrator = CSVRIntegrator(
-                system=self.simulation.system,
+                system=system.system,
                 temperature=temperature,
                 tau=friction,
                 timestep=time_step,
@@ -173,7 +176,7 @@ class OMMFF:
             )
         elif integrator_name == "csvr_verlet":
             integrator = CSVRIntegrator(
-                system=self.simulation.system,
+                system=system.system,
                 temperature=temperature,
                 tau=friction,
                 timestep=time_step,
@@ -181,7 +184,7 @@ class OMMFF:
             )
         elif integrator_name == "csvr_verlet_end":
             integrator = CSVRIntegrator(
-                system=self.simulation.system,
+                system=system.system,
                 temperature=temperature,
                 tau=friction,
                 timestep=time_step,
@@ -224,7 +227,7 @@ class OMMFF:
             properties = {"Threads": "1"}
 
         self.simulation = self._init_simulation(
-            system,
+            system.system,
             integrator,
             platform,
             properties,
@@ -246,17 +249,54 @@ class OMMFF:
         simulation = Simulation(topology, system, integrator, platform, properties)
         return simulation
 
-    def _load_or_initialize(self, system, temperature):
+    def _load_or_initialize(
+        self, system, temperature, minimize_init, minimize_intervals
+    ):
         """Loads or initializes the simulation with a given system and temperature.
 
         Arguments:
             system: An OpenMM system
             temperature: A float specifying the temperature in Kelvin
+            minimize_init: A boolean indicating whether to slowly initialize or not
+            minimize_intervals: A boolean indicating the spacing used for minimization
         """
         if self.count == 0:
             print("Minimizing energy")
             self.simulation.context.setPositions(system.positions)
-            self.simulation.minimizeEnergy()
+            if minimize_init:
+                minimize_intervals = int(minimize_intervals)
+                # slowly initialize
+                # Get currents cvs0, see where they need to be, and then get there in minimize_intervals number of steps
+                _, _, _, _, _, _, cvs0 = self.get_information()
+                cvs0_target = []
+                for i in range(len(self.parameter_name)):
+                    cvs0_target.append(
+                        self.simulation.context.getParameter(self.parameter_name[i])
+                    )
+                cvs0_target = np.array(cvs0_target)
+                print(
+                    f"Before minimization on {self.rank}: current CV values: {cvs0}, target CV values: {cvs0_target}"
+                )
+                cvs0_spline = np.zeros((minimize_intervals + 1, len(cvs0)))
+                for i in range(len(cvs0)):
+                    cvs0_spline[:, i] = np.linspace(
+                        cvs0[i], cvs0_target[i], minimize_intervals + 1
+                    )
+                for i in range(minimize_intervals):
+                    cvs0 = cvs0_spline[i]
+                    for j in range(len(self.parameter_name)):
+                        self.simulation.context.setParameter(
+                            self.parameter_name[j], cvs0[j]
+                        )
+                    self.simulation.minimizeEnergy(
+                        tolerance=0.1 * kilojoule / mole / nanometers
+                    )
+                _, _, _, _, _, _, cvs0 = self.get_information()
+                print(
+                    f"After minimization on {self.rank}: current CV values: {cvs0}, target CV values: {cvs0_target}"
+                )
+            else:
+                self.simulation.minimizeEnergy()
             self.simulation.context.setVelocitiesToTemperature(temperature)
         else:
             try:
@@ -280,8 +320,8 @@ class OMMFF:
             restart_reporter = CheckpointReporter(
                 f"{self.base_filename}_restart.chk", save_int
             )
-            self.simulation.reporters.append(reporter)
             self.simulation.reporters.append(restart_reporter)
+            self.simulation.reporters.append(reporter)
 
     def run_sim(self, steps, close_file=False):
         """Runs self.simulation for given number of steps.
@@ -402,7 +442,7 @@ class OMMFF:
                 self._cleanup_trajectory_files(h5_file, h5_string)
                 exit(0)
 
-            string_count = self._run_trajectory_iteration(
+            string_count, h5_file = self._run_trajectory_iteration(
                 iteration,
                 save_freq,
                 tag,
@@ -494,7 +534,7 @@ class OMMFF:
                 iteration, burn_in, string_count, h5_string
             )
 
-        return string_count
+        return string_count, h5_file
 
     def _save_energy_data(self, tag, pe):
         """Save potential energy data."""
@@ -571,7 +611,7 @@ class OMMFF:
 
         mean_cvs_x = np.mean(np.cos(cvs_store_np), axis=0)
         mean_cvs_y = np.mean(np.sin(cvs_store_np), axis=0)
-        cvs_diff = np.arctan2(mean_cvs_x, mean_cvs_y)
+        cvs_diff = np.arctan2(mean_cvs_y, mean_cvs_x)
         cvs_diff *= forces0
 
         metric = np.mean(self.metric_store, axis=0)
@@ -818,11 +858,11 @@ def thomas_inverse_batch_d(a, b, c, d):
         d: A 2D numpy array of shape (n, b) where n is the number of equations and b is the batch size
     """  # noqa: D205
     n = b.shape[0]
-    b = d.shape[1]  # Batch size
+    bs = d.shape[1]  # Batch size
 
     c_prime = np.zeros(n - 1, dtype=np.float64)
-    d_prime = np.zeros((n, b), dtype=np.float64)
-    x = np.zeros((n, b), dtype=np.float64)
+    d_prime = np.zeros((n, bs), dtype=np.float64)
+    x = np.zeros((n, bs), dtype=np.float64)
 
     # --- Forward elimination ---
     b0_inv = 1.0 / b[0]

@@ -67,6 +67,8 @@ class OMMFFReplica(OMMFF):
             cv_weights=None,  # Not used in replica exchange
             update_ends=True,  # Not used in replica exchange
             comm=comm,
+            minimize_init=False,  # Not used in replica exchange
+            minimize_final=False,  # Not used in replica exchange
         )
 
         # Initialize replica-specific attributes
@@ -203,7 +205,7 @@ class OMMFFReplica(OMMFF):
                 self._cleanup_replica_trajectory_files(h5_file)
                 exit(0)
 
-            self._run_replica_trajectory_iteration(
+            h5_file = self._run_replica_trajectory_iteration(
                 iteration, save_freq, tag, h5_file, h5_freq, precision, swap_freq
             )
 
