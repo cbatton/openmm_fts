@@ -532,20 +532,20 @@ class OMMFF:
         h5_file.early_close()
         h5_string.close()
 
-        def _should_update_string(self, iteration, burn_in):
-            """Check if string should be updated at this iteration."""
-            return (
-                iteration % self.string_freq == 0
-                and iteration != 0
-                and iteration / self.string_freq > burn_in
-            )
+    def _should_update_string(self, iteration, burn_in):
+        """Check if string should be updated at this iteration."""
+        return (
+            iteration % self.string_freq == 0
+            and iteration != 0
+            and iteration / self.string_freq > burn_in
+        )
 
-        def _should_reset_storage(self, iteration, burn_in):
-            """Check if storage should be reset during burn-in."""
-            return (
-                iteration % self.string_freq == 0
-                and iteration / self.string_freq <= burn_in
-            )
+    def _should_reset_storage(self, iteration, burn_in):
+        """Check if storage should be reset during burn-in."""
+        return (
+            iteration % self.string_freq == 0
+            and iteration / self.string_freq <= burn_in
+        )
 
     def _collect_current_cvs_and_forces(self):
         """Collect current CV values and forces from simulation context."""
