@@ -7,28 +7,20 @@ import h5py
 import numba
 import numpy as np
 from mdtraj.reporters import HDF5Reporter
-from openmm import (
-    BrownianIntegrator,
-    CMMotionRemover,
-    LangevinMiddleIntegrator,
-    Platform,
-)
-from openmm.app import CheckpointReporter, Simulation
 from openmm.unit import (
     AVOGADRO_CONSTANT_NA,
     BOLTZMANN_CONSTANT_kB,
     kelvin,
     md_unit_system,
-    nanometers,
     picoseconds,
 )
-from openmm_csvr.csvr import CSVRIntegrator
 
+from omm import OMMFF
 from traj_writer import TrajWriter
 
 
-class OMMFF:
-    """OMM Interface with a given system."""
+class OMMFFReplica(OMMFF):
+    """OMM Interface for Hamiltonian replica exchange simulations."""
 
     def __init__(
         self,
@@ -51,205 +43,34 @@ class OMMFF:
         comm=None,
         swap_scheme="mixing",
     ):
-        self._setup_filenames_and_count(folder_name)
-        self._initialize_system_forces(
-            system,
-            velocities_com,
-            custom_forces,
-            string_forces,
+        # Initialize parent class
+        super().__init__(
+            system=system,
+            platform=platform,
+            precision=precision,
+            integrator_name=integrator_name,
+            temperature=temperature,
+            velocities_com=velocities_com,
+            time_step=time_step,
+            friction=friction,
+            seed=seed,
+            save_int=save_int,
+            folder_name=folder_name,
+            custom_forces=custom_forces,
+            string_forces=string_forces,
+            force_groups=force_groups,
+            parameter_name=parameter_name,
+            parameter_force_name=parameter_force_name,
+            string_freq=None,  # Not used in replica exchange
+            string_dt=None,  # Not used in replica exchange
+            string_kappa=None,  # Not used in replica exchange
+            cv_weights=None,  # Not used in replica exchange
+            update_ends=True,  # Not used in replica exchange
+            comm=comm,
         )
-        self.force_groups = force_groups
-        self.parameter_name = parameter_name
-        self.parameter_force_name = parameter_force_name
-        self.comm = comm
-        if self.comm is not None:
-            self.rank = self.comm.Get_rank()
-            self.size = self.comm.Get_size()
 
-        integrator = self._create_integrator(
-            integrator_name,
-            temperature,
-            friction,
-            time_step,
-            seed,
-        )
-        self._initialize_simulation(
-            system,
-            integrator,
-            platform,
-            precision,
-            system.topology,
-        )
-        self._load_or_initialize(system, temperature)
-        self._setup_reporters(save_int)
+        # Initialize replica-specific attributes
         self._setup_swap_scheme(swap_scheme, temperature)
-        self.num_atoms = len(system.positions)
-
-    def _setup_filenames_and_count(self, folder_name):
-        """Sets up the filenames and count for the simulation."""
-        self.folder_name = folder_name
-        self.base_filename = f"{self.folder_name}"
-        count_file = Path(f"{self.base_filename}_count.txt")
-        if count_file.exists():
-            self.count = int(np.loadtxt(count_file) + 1)
-        else:
-            self.count = 0
-        np.savetxt(count_file, [self.count], fmt="%d")
-        self.base_filename_2 = f"{self.folder_name}_{self.count}"
-        self.internal_count = 0
-
-    def _initialize_system_forces(
-        self, system, velocities_com, custom_forces, string_forces
-    ):
-        """Initializes the system forces for the simulation."""
-        if velocities_com:
-            system.system.addForce(CMMotionRemover())
-        if custom_forces is not None:
-            if not isinstance(custom_forces, list):
-                custom_forces = [custom_forces]
-            for custom_force in custom_forces:
-                system.system.addForce(custom_force)
-        self.custom_forces = custom_forces
-        if string_forces is not None:
-            if not isinstance(string_forces, list):
-                string_forces = [string_forces]
-            for custom_force in string_forces:
-                system.system.addForce(custom_force)
-            self.cvs_store = []
-            self.metric_store = []
-        self.string_forces = string_forces
-
-    def _create_integrator(
-        self, integrator_name, temperature, friction, time_step, seed
-    ):
-        """Creates an OpenMM integrator based on the given parameters."""
-        if integrator_name == "csvr_leapfrog":
-            integrator = CSVRIntegrator(
-                system=self.simulation.system,
-                temperature=temperature,
-                tau=friction,
-                timestep=time_step,
-                scheme="leapfrog",
-            )
-        elif integrator_name == "csvr_leapfrog_end":
-            integrator = CSVRIntegrator(
-                system=self.simulation.system,
-                temperature=temperature,
-                tau=friction,
-                timestep=time_step,
-                scheme="leapfrog_end",
-            )
-        elif integrator_name == "csvr_verlet":
-            integrator = CSVRIntegrator(
-                system=self.simulation.system,
-                temperature=temperature,
-                tau=friction,
-                timestep=time_step,
-                scheme="verlet",
-            )
-        elif integrator_name == "csvr_verlet_end":
-            integrator = CSVRIntegrator(
-                system=self.simulation.system,
-                temperature=temperature,
-                tau=friction,
-                timestep=time_step,
-                scheme="verlet_end",
-            )
-        elif integrator_name == "langevin":
-            integrator = LangevinMiddleIntegrator(
-                temperature,
-                friction,
-                time_step,
-            )
-        elif integrator_name == "brownian":
-            integrator = BrownianIntegrator(
-                temperature,
-                friction,
-                time_step,
-            )
-        else:
-            raise ValueError("Integrator name not recognized")
-        integrator.setRandomNumberSeed(seed)
-        return integrator
-
-    def _initialize_simulation(self, system, integrator, platform, precision, topology):
-        """Initializes an OpenMM simulation.
-
-        Arguments:
-            system: An OpenMM system
-            integrator: An OpenMM integrator
-            platform: An OpenMM platform specifying the device information
-            precision: A string specifying the precision of the simulation
-            topology: An OpenMM topology object
-        Returns:
-            simulation: An OpenMM simulation object
-        """
-        platform = Platform.getPlatformByName(platform)
-        properties = {}
-        if platform == "CUDA":
-            properties = {"Precision": precision}
-        elif platform == "CPU":
-            properties = {"Threads": "1"}
-
-        self.simulation = self._init_simulation(
-            system,
-            integrator,
-            platform,
-            properties,
-            topology,
-        )
-
-    def _init_simulation(self, system, integrator, platform, properties, topology):
-        """Initializes an OpenMM simulation.
-
-        Arguments:
-            system: An OpenMM system
-            integrator: An OpenMM integrator
-            platform: An OpenMM platform specifying the device information
-            properties: A dictionary of properties for the platform
-            topology: An OpenMM topology object
-        Returns:
-            simulation: An OpenMM simulation object
-        """
-        simulation = Simulation(topology, system, integrator, platform, properties)
-        return simulation
-
-    def _load_or_initialize(self, system, temperature):
-        """Loads or initializes the simulation with a given system and temperature.
-
-        Arguments:
-            system: An OpenMM system
-            temperature: A float specifying the temperature in Kelvin
-        """
-        if self.count == 0:
-            print("Minimizing energy")
-            self.simulation.context.setPositions(system.positions)
-            self.simulation.minimizeEnergy()
-            self.simulation.context.setVelocitiesToTemperature(temperature)
-        else:
-            try:
-                self.simulation.loadCheckpoint(f"{self.base_filename}_restart.chk")
-            except Exception:
-                # Previous one failed, try loading old restart file
-                base_filename_old = f"{self.folder_name}_{self.count - 1}"
-                self.simulation.loadCheckpoint(f"{base_filename_old}_restart.chk")
-        self.simulation.saveCheckpoint(f"{self.base_filename_2}_restart.chk")
-        self.simulation.saveState(f"{self.base_filename_2}_restart.xml")
-
-    def _setup_reporters(self, save_int):
-        """Sets up the reporters for the simulation."""
-        self.save_int = save_int
-        # Set up reporters
-        self.simulation.reporters = []
-        if save_int > 0:
-            reporter = HDF5Reporter(
-                f"{self.base_filename_2}_{self.internal_count}.h5", save_int
-            )
-            restart_reporter = CheckpointReporter(
-                f"{self.base_filename}_restart.chk", save_int
-            )
-            self.simulation.reporters.append(reporter)
-            self.simulation.reporters.append(restart_reporter)
 
     def _setup_swap_scheme(self, swap_scheme, temperature):
         """Sets up the swap scheme for the simulation."""
@@ -260,6 +81,9 @@ class OMMFF:
         self.swap_scheme = swap_scheme
         self.beta = 1.0 / (temperature * BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA)
         self.beta = self.beta.value_in_unit_system(md_unit_system)
+        self.num_attempted = None
+        self.num_accepted = None
+
         if self.comm is not None:
             self.nswap_attemps = self.size**3
             self.parameter_values_rank = np.zeros(
@@ -283,6 +107,10 @@ class OMMFF:
             # use MPI to get all parameter values
             self.comm.Allgather(self.parameter_values_rank, self.parameter_values)
             self.comm.Allgather(self.force_values_rank, self.force_values)
+
+            # Initialize replica rank
+            self.replica_rank = self.rank
+
             if Path("replica_ranks.h5").exists():
                 with h5py.File("replica_ranks.h5", "r") as f:
                     # get the last config
@@ -297,32 +125,10 @@ class OMMFF:
                             name, self.force_values[self.replica_rank, i]
                         )
 
-    def run_sim(self, steps, close_file=False):
-        """Runs self.simulation for given number of steps.
-
-        Arguments:
-            steps: The number of steps to run the simulation for
-            close_file: A bool to determine whether to close file. Necessary
-            if using HDF5Reporter
-        """
-        self.simulation.step(steps)
-        if close_file:
-            self.simulation.reporters[1].close()
-
     def get_information(self, as_numpy=True, enforce_periodic_box=True):
         """Gets information (positions, forces and PE of system).
 
-        Arguments:
-            as_numpy: A boolean of whether to return as a numpy array
-            enforce_periodic_box: A boolean of whether to enforce periodic boundary conditions
-        Returns:
-            positions: A numpy array of shape (n_atoms, 3) corresponding to the positions in nm
-            velocities: A numpy array of shape (n_atoms, 3) corresponding to the velocities in nm/ps
-            forces: A numpy array of shape (n_atoms, 3) corresponding to the force in kJ/mol*nm
-            pe: A float coressponding to the potential energy in kJ/mol
-            ke: A float coressponding to the kinetic energy in kJ/mol
-            cell: A numpy array of shape (3, 3) corresponding to the cell vectors in nm
-            cvs: A list of numpy arrays of shape (n_cvs,) corresponding to the collective variables
+        Overrides parent method to handle replica-specific CV collection.
         """
         state = self.simulation.context.getState(
             getForces=True,
@@ -377,40 +183,37 @@ class OMMFF:
         precision=32,
         burn_in=1,
         swap_freq=1,
+        **kwargs,  # Ignore string method parameters
     ):
-        """Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs) are saved every save_freq time steps.
-
-        Arguments:
-            init_pos: A numpy array of shape (n_atoms, 3) corresponding to the initial positions in Angstroms
-            num_data_points: An int specifying the number of data points to generate
-            save_freq: An int specifying the frequency to save data
-            h5_freq: An int specifying the frequency to make a new h5 file
-            enforce_periodic_box: A boolean of whether to enforce periodic boundary conditions
-            tag: A string specifying the tag to save the data
-            time_max: An int specifying the maximum time to run the simulation for
-            precision: An int specifying the precision of the storage
-            burn_in: An int specifying the number of initial steps to burn in before swapping
-            swap_freq: An int specifying the frequency to swap replicas
-        """
-        if tag is None:
-            tag = self.base_filename
-
-        if init_pos is not None:
-            init_pos = init_pos * nanometers
-            self.simulation.context.setPositions(init_pos)
-
-        # Start a timer
+        """Generates long trajectory with replica exchange swaps."""
+        # Setup phase
+        tag = self._setup_trajectory_tag(tag)
+        start_iter = self._setup_trajectory_start(tag)
         time_start = time.time()
-        start_iter = 0
-        try:
-            data = np.loadtxt(tag + "_pe.txt")
-            start_iter = len(data)
-        except Exception:
-            start_iter = 0
-            pass
 
+        # Initialize trajectory files (replica-specific)
+        h5_file = self._setup_replica_trajectory_files(start_iter, h5_freq, precision)
+
+        # Set initial positions if provided
+        self._set_initial_positions(init_pos)
+
+        # Main simulation loop
+        for iteration in range(start_iter, num_data_points):
+            if self._should_exit_early(time_start, time_max):
+                self._cleanup_replica_trajectory_files(h5_file)
+                exit(0)
+
+            self._run_replica_trajectory_iteration(
+                iteration, save_freq, tag, h5_file, h5_freq, precision, swap_freq
+            )
+
+        # Natural completion cleanup
+        self._cleanup_replica_trajectory_files(h5_file)
+
+    def _setup_replica_trajectory_files(self, start_iter, h5_freq, precision):
+        """Setup replica-specific trajectory files."""
         h5_chunk = -(start_iter % h5_freq) + h5_freq + 1
-        h5_file = TrajWriter(
+        return TrajWriter(
             f"{self.base_filename_2}_{self.internal_count}_data.h5",
             self.num_atoms,
             h5_chunk,
@@ -418,76 +221,77 @@ class OMMFF:
             cvs=self.string_forces,
             rank=True,
         )
-        for _ in range(start_iter, num_data_points):
-            self.run_sim(save_freq)
-            (
-                positions,
-                velocities,
-                forces,
-                pe,
-                ke,
-                cell,
-                cvs,
-            ) = self.get_information()
 
-            # save plainly pe to keep a count
-            f = open(f"{tag}_pe.txt", "ab")
-            np.savetxt(f, np.expand_dims(pe, 0), fmt="%.9e")
-            f.close()
+    def _run_replica_trajectory_iteration(
+        self, iteration, save_freq, tag, h5_file, h5_freq, precision, swap_freq
+    ):
+        """Run a single replica trajectory iteration."""
+        # Run simulation step
+        self.run_sim(save_freq)
 
-            if _ % swap_freq == 0 and self.comm is not None and _ != 0:
-                self._perform_replica_swap(cvs)
+        # Get system information
+        positions, velocities, forces, pe, ke, cell, cvs = self.get_information()
 
-            h5_file.write_frame(
-                positions,
-                velocities,
-                forces,
-                pe,
-                ke,
-                cell,
-                cvs=cvs,
-                rank=self.replica_rank,
-            )
+        # Save energy data
+        self._save_energy_data(tag, pe)
 
-            if _ % h5_freq == 0 and _ != 0:
-                self.simulation.reporters[1].close()
-                self.internal_count += 1
-                self.simulation.reporters[1] = HDF5Reporter(
-                    f"{self.base_filename_2}_{self.internal_count}.h5",
-                    self.save_int,
-                )
-                h5_file.close()
-                h5_file = TrajWriter(
-                    f"{self.base_filename_2}_{self.internal_count}_data.h5",
-                    self.num_atoms,
-                    h5_freq,
-                    precision=precision,
-                    cvs=self.string_forces,
-                    rank=True,
-                )
+        # Handle replica swaps
+        if self._should_attempt_swap(iteration, swap_freq):
+            self._perform_replica_swap(cvs)
 
-            # End timer
-            time_end = time.time()
-            # If time is greater than time_max, break
-            if time_end - time_start > time_max:
-                self.simulation.reporters[1].close()
-                h5_file.early_close()
-                exit(0)
-        # If naturally ended, close the h5 files
+        # Write trajectory frame with replica rank
+        h5_file.write_frame(
+            positions, velocities, forces, pe, ke, cell, cvs=cvs, rank=self.replica_rank
+        )
+
+        # Handle file rotation
+        if self._should_rotate_files(iteration, h5_freq):
+            h5_file = self._rotate_replica_trajectory_files(h5_file, h5_freq, precision)
+
+        return h5_file
+
+    def _should_attempt_swap(self, iteration, swap_freq):
+        """Check if replica swap should be attempted."""
+        return iteration % swap_freq == 0 and self.comm is not None and iteration != 0
+
+    def _rotate_replica_trajectory_files(self, h5_file, h5_freq, precision):
+        """Rotate replica trajectory files."""
+        self.simulation.reporters[1].close()
+        self.internal_count += 1
+
+        # Create new HDF5 reporter
+        self.simulation.reporters[1] = HDF5Reporter(
+            f"{self.base_filename_2}_{self.internal_count}.h5",
+            self.save_int,
+        )
+
+        # Close old file and create new one
+        h5_file.close()
+        return TrajWriter(
+            f"{self.base_filename_2}_{self.internal_count}_data.h5",
+            self.num_atoms,
+            h5_freq,
+            precision=precision,
+            cvs=self.string_forces,
+            rank=True,
+        )
+
+    def _cleanup_replica_trajectory_files(self, h5_file):
+        """Clean up replica trajectory files."""
         self.simulation.reporters[1].close()
         h5_file.early_close()
 
-    def _gather_replica_data(self, cvs):
-        """Gather collective variables and replica ranks from all processes."""
-        cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
-        self.comm.Allgather(cvs, cvs_all)
+        def _gather_replica_data(self, cvs):
+            """Gather collective variables and replica ranks from all processes."""
+            cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
+            self.comm.Allgather(cvs, cvs_all)
 
-        replica_rank_all = np.zeros(self.size, dtype=np.int64)
-        self.comm.Allgather(
-            np.array(self.replica_rank, dtype=np.int64), replica_rank_all
-        )
+            replica_rank_all = np.zeros(self.size, dtype=np.int64)
+            self.comm.Allgather(
+                np.array(self.replica_rank, dtype=np.int64), replica_rank_all
+            )
 
-        return cvs_all, replica_rank_all
+            return cvs_all, replica_rank_all
 
     def _update_replica_parameters(self, replica_rank_new):
         """Update simulation context parameters based on new replica assignment."""
@@ -656,7 +460,6 @@ def mix_neighboring_replicas(
         parameter_values: A numpy array of shape (n_replicas, n_parameters) corresponding to the parameter values of all replicas
         force_values: A numpy array of shape (n_replicas, n_forces) corresponding to the force values of all replicas
         replica_rank: An int corresponding to the rank of the current replica
-        nswap_attemps: An int specifying the number of swap attempts
     Returns:
         replica_rank: An int corresponding to the new rank of the replica after mixing
         num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas

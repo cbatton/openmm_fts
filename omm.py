@@ -381,44 +381,60 @@ class OMMFF:
         beta1=0.9,
         beta2=0.999,
     ):
-        """
-        Generates long trajectory of length num_data_points*save_freq time steps where information (pos, vel, forces, pe, ke, cell, cvs)
-           are saved every save_freq time steps.
-
-        Arguments:
-            init_pos: A numpy array of shape (n_atoms, 3) corresponding to the initial positions in Angstroms
-            num_data_points: An int specifying the number of data points to generate
-            save_freq: An int specifying the frequency to save data
-            h5_freq: An int specifying the frequency to make a new h5 file
-            enforce_periodic_box: A boolean of whether to enforce periodic boundary conditions
-            tag: A string specifying the tag to save the data
-            time_max: An int specifying the maximum time to run the simulation for
-            precision: An int specifying the precision of the storage
-            burn_in: An int specifying the number of iterations to burn in before starting to update the string
-            beta1: A float specifying the beta1 parameter for the Adam optimizer
-            beta2: A float specifying the beta2 parameter for the Adam optimizer
-        """  # noqa: D205
-        if tag is None:
-            tag = self.base_filename
-
-        if init_pos is not None:
-            init_pos = init_pos * nanometers
-            self.simulation.context.setPositions(init_pos)
-
-        # Start a timer
+        """Generates long trajectory with improved modularity."""
+        # Setup phase
+        tag = self._setup_trajectory_tag(tag)
+        start_iter = self._setup_trajectory_start(tag)
         time_start = time.time()
-        start_iter = 0
+
+        # Initialize trajectory files and Adam optimizer
+        h5_string, h5_file = self._setup_trajectory_files(
+            start_iter, h5_freq, precision, beta1, beta2
+        )
+
+        # Set initial positions if provided
+        self._set_initial_positions(init_pos)
+
+        # Main simulation loop
+        string_count = 0
+        for iteration in range(start_iter, num_data_points):
+            if self._should_exit_early(time_start, time_max):
+                self._cleanup_trajectory_files(h5_file, h5_string)
+                exit(0)
+
+            string_count = self._run_trajectory_iteration(
+                iteration,
+                save_freq,
+                tag,
+                h5_file,
+                h5_freq,
+                precision,
+                burn_in,
+                string_count,
+                h5_string,
+            )
+
+        # Natural completion cleanup
+        self._cleanup_trajectory_files(h5_file, h5_string)
+
+    def _setup_trajectory_tag(self, tag):
+        """Setup trajectory tag."""
+        return tag if tag is not None else self.base_filename
+
+    def _setup_trajectory_start(self, tag):
+        """Setup starting iteration from existing data."""
         try:
             data = np.loadtxt(tag + "_pe.txt")
-            start_iter = len(data)
+            return len(data)
         except Exception:
-            start_iter = 0
-            pass
+            return 0
 
-        # prepare h5 file on rank 0 to store string data at each update
+    def _setup_trajectory_files(self, start_iter, h5_freq, precision, beta1, beta2):
+        """Setup trajectory output files."""
+        # String file setup
         h5_string = h5py.File(f"{self.base_filename_2}_string.h5", "w")
-        string_count = 0
 
+        # Data file setup
         h5_chunk = -(start_iter % h5_freq) + h5_freq + 1
         h5_file = TrajWriter(
             f"{self.base_filename_2}_{self.internal_count}_data.h5",
@@ -427,77 +443,109 @@ class OMMFF:
             precision=precision,
             cvs=self.string_forces,
         )
+
+        # Adam optimizer setup
         self.adam = Adam(lr=self.string_dt, beta1=beta1, beta2=beta2)
-        for _ in range(start_iter, num_data_points):
-            self.run_sim(save_freq)
-            (
-                positions,
-                velocities,
-                forces,
-                pe,
-                ke,
-                cell,
-                cvs,
-            ) = self.get_information()
 
-            # save plainly pe to keep a count
-            f = open(f"{tag}_pe.txt", "ab")
+        return h5_string, h5_file
+
+    def _set_initial_positions(self, init_pos):
+        """Set initial positions if provided."""
+        if init_pos is not None:
+            init_pos = init_pos * nanometers
+            self.simulation.context.setPositions(init_pos)
+
+    def _should_exit_early(self, time_start, time_max):
+        """Check if simulation should exit early due to time limit."""
+        return time.time() - time_start > time_max
+
+    def _run_trajectory_iteration(
+        self,
+        iteration,
+        save_freq,
+        tag,
+        h5_file,
+        h5_freq,
+        precision,
+        burn_in,
+        string_count,
+        h5_string,
+    ):
+        """Run a single trajectory iteration."""
+        # Run simulation step
+        self.run_sim(save_freq)
+
+        # Get system information
+        positions, velocities, forces, pe, ke, cell, cvs = self.get_information()
+
+        # Save energy data
+        self._save_energy_data(tag, pe)
+
+        # Write trajectory frame
+        h5_file.write_frame(positions, velocities, forces, pe, ke, cell, cvs)
+
+        # Handle file rotation
+        if self._should_rotate_files(iteration, h5_freq):
+            h5_file = self._rotate_trajectory_files(h5_file, h5_freq, precision)
+
+        # Handle string method updates
+        if self.string_freq is not None:
+            string_count = self._handle_string_method_update(
+                iteration, burn_in, string_count, h5_string
+            )
+
+        return string_count
+
+    def _save_energy_data(self, tag, pe):
+        """Save potential energy data."""
+        with open(f"{tag}_pe.txt", "ab") as f:
             np.savetxt(f, np.expand_dims(pe, 0), fmt="%.9e")
-            f.close()
 
-            h5_file.write_frame(positions, velocities, forces, pe, ke, cell, cvs)
+    def _should_rotate_files(self, iteration, h5_freq):
+        """Check if trajectory files should be rotated."""
+        return iteration % h5_freq == 0 and iteration != 0
 
-            if _ % h5_freq == 0 and _ != 0:
-                self.simulation.reporters[1].close()
-                self.internal_count += 1
-                self.simulation.reporters[1] = HDF5Reporter(
-                    f"{self.base_filename_2}_{self.internal_count}.h5",
-                    self.save_int,
-                )
-                h5_file.close()
-                h5_file = TrajWriter(
-                    f"{self.base_filename_2}_{self.internal_count}_data.h5",
-                    self.num_atoms,
-                    h5_freq,
-                    precision=precision,
-                    cvs=self.string_forces,
-                )
+    def _rotate_trajectory_files(self, h5_file, h5_freq, precision):
+        """Rotate trajectory files."""
+        self.simulation.reporters[1].close()
+        self.internal_count += 1
 
-            if self.string_freq is not None:
-                string_count = self._handle_string_method_update(
-                    _,
-                    burn_in,
-                    string_count,
-                    h5_string,
-                )
+        # Create new HDF5 reporter
+        self.simulation.reporters[1] = HDF5Reporter(
+            f"{self.base_filename_2}_{self.internal_count}.h5",
+            self.save_int,
+        )
 
-            # End timer
-            time_end = time.time()
-            # If time is greater than time_max, break
-            if time_end - time_start > time_max:
-                self.simulation.reporters[1].close()
-                h5_file.early_close()
-                h5_string.close()
-                exit(0)
-        # If naturally ended, close the h5 files
+        # Close old file and create new one
+        h5_file.close()
+        return TrajWriter(
+            f"{self.base_filename_2}_{self.internal_count}_data.h5",
+            self.num_atoms,
+            h5_freq,
+            precision=precision,
+            cvs=self.string_forces,
+        )
+
+    def _cleanup_trajectory_files(self, h5_file, h5_string):
+        """Clean up trajectory files."""
         self.simulation.reporters[1].close()
         h5_file.early_close()
         h5_string.close()
 
-    def _should_update_string(self, iteration, burn_in):
-        """Check if string should be updated at this iteration."""
-        return (
-            iteration % self.string_freq == 0
-            and iteration != 0
-            and iteration / self.string_freq > burn_in
-        )
+        def _should_update_string(self, iteration, burn_in):
+            """Check if string should be updated at this iteration."""
+            return (
+                iteration % self.string_freq == 0
+                and iteration != 0
+                and iteration / self.string_freq > burn_in
+            )
 
-    def _should_reset_storage(self, iteration, burn_in):
-        """Check if storage should be reset during burn-in."""
-        return (
-            iteration % self.string_freq == 0
-            and iteration / self.string_freq <= burn_in
-        )
+        def _should_reset_storage(self, iteration, burn_in):
+            """Check if storage should be reset during burn-in."""
+            return (
+                iteration % self.string_freq == 0
+                and iteration / self.string_freq <= burn_in
+            )
 
     def _collect_current_cvs_and_forces(self):
         """Collect current CV values and forces from simulation context."""
