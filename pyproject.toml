@@ -1,4 +1,49 @@
 # pyproject.toml
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openmm_fts"
+version = "0.1.0"
+description = "Examples using the string method in collective variables on alanine dipeptide in OpenMM."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Clay Batton", email = "cbatton35@example.com"}
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "h5py",
+    "numba",
+    "mdtraj",
+    "openmm",
+    "openmmtools",
+    "openmm_csvr @ git+https://github.com/cbatton/openmm_csvr.git",
+    "mpi4py",
+]
+
+[project.optional-dependencies]
+conversion = [
+    "gsd>=2.0.0",
+]
+
+[project.scripts]
+omm-fts = "omm_fts.scripts.run_fts:main"
+omm-replica = "omm_fts.scripts.run_replica:main"
+omm-convert = "omm_fts.scripts.convert_h5_to_gsd:main"
+
+[tool.setuptools]
+packages = ["omm_fts"]
+
+[tool.setuptools.package-dir]
+omm_fts = "omm_fts"
 
 [tool.ruff]
 line-length = 88
