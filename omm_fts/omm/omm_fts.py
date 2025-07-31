@@ -12,13 +12,14 @@ from openmm import (
     CMMotionRemover,
     LangevinMiddleIntegrator,
     Platform,
+    VerletIntegrator,
 )
 from openmm.app import CheckpointReporter, Simulation
 from openmm.unit import kelvin, kilojoule, md_unit_system, mole, nanometers, picoseconds
 from openmm_csvr.csvr import CSVRIntegrator
 from scipy.interpolate import interp1d
 
-from traj_writer import TrajWriter
+from ..io.traj_writer import TrajWriter
 
 
 class OMMFF:
@@ -148,11 +149,12 @@ class OMMFF:
         self.a_vec = np.zeros(self.size - 1, dtype=np.float64)
         self.b_vec = np.zeros(self.size, dtype=np.float64)
         self.c_vec = np.zeros(self.size - 1, dtype=np.float64)
-        self.a_vec[:-1] = -self.string_kappa
-        self.c_vec[1:] = -self.string_kappa
-        self.b_vec[1:-1] = 1 + 2 * self.string_kappa
-        self.b_vec[0] = 1
-        self.b_vec[-1] = 1
+        if self.string_kappa is not None:
+            self.a_vec[:-1] = -self.string_kappa
+            self.c_vec[1:] = -self.string_kappa
+            self.b_vec[1:-1] = 1 + 2 * self.string_kappa
+            self.b_vec[0] = 1
+            self.b_vec[-1] = 1
 
     def _create_integrator(
         self, system, integrator_name, temperature, friction, time_step, seed
@@ -202,6 +204,8 @@ class OMMFF:
                 friction,
                 time_step,
             )
+        elif integrator_name == "verlet":
+            integrator = VerletIntegrator(time_step)
         else:
             raise ValueError("Integrator name not recognized")
         integrator.setRandomNumberSeed(seed)
@@ -440,7 +444,8 @@ class OMMFF:
         for iteration in range(start_iter, num_data_points):
             if self._should_exit_early(time_start, time_max):
                 self._cleanup_trajectory_files(h5_file, h5_string)
-                exit(0)
+                self.comm.Barrier()
+                return
 
             string_count, h5_file = self._run_trajectory_iteration(
                 iteration,
@@ -715,7 +720,6 @@ class OMMFF:
         # Convert back to [-pi, pi] range
         cv_global = cv_global - 2 * np.pi * np.rint(cv_global / (2 * np.pi))
 
-        print(cv_global)
         self._save_string_data(
             cv_global,
             cv_global_pre,

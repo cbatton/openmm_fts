@@ -15,8 +15,8 @@ from openmm.unit import (
     picoseconds,
 )
 
-from omm import OMMFF
-from traj_writer import TrajWriter
+from ..io.traj_writer import TrajWriter
+from .omm_fts import OMMFF
 
 
 class OMMFFReplica(OMMFF):
@@ -68,7 +68,7 @@ class OMMFFReplica(OMMFF):
             update_ends=True,  # Not used in replica exchange
             comm=comm,
             minimize_init=False,  # Not used in replica exchange
-            minimize_final=False,  # Not used in replica exchange
+            minimize_intervals=None,  # Not used in replica exchange
         )
 
         # Initialize replica-specific attributes
@@ -203,7 +203,8 @@ class OMMFFReplica(OMMFF):
         for iteration in range(start_iter, num_data_points):
             if self._should_exit_early(time_start, time_max):
                 self._cleanup_replica_trajectory_files(h5_file)
-                exit(0)
+                self.comm.Barrier()
+                return
 
             h5_file = self._run_replica_trajectory_iteration(
                 iteration, save_freq, tag, h5_file, h5_freq, precision, swap_freq
@@ -283,17 +284,17 @@ class OMMFFReplica(OMMFF):
         self.simulation.reporters[1].close()
         h5_file.early_close()
 
-        def _gather_replica_data(self, cvs):
-            """Gather collective variables and replica ranks from all processes."""
-            cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
-            self.comm.Allgather(cvs, cvs_all)
+    def _gather_replica_data(self, cvs):
+        """Gather collective variables and replica ranks from all processes."""
+        cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
+        self.comm.Allgather(cvs, cvs_all)
 
-            replica_rank_all = np.zeros(self.size, dtype=np.int64)
-            self.comm.Allgather(
-                np.array(self.replica_rank, dtype=np.int64), replica_rank_all
-            )
+        replica_rank_all = np.zeros(self.size, dtype=np.int64)
+        self.comm.Allgather(
+            np.array(self.replica_rank, dtype=np.int64), replica_rank_all
+        )
 
-            return cvs_all, replica_rank_all
+        return cvs_all, replica_rank_all
 
     def _update_replica_parameters(self, replica_rank_new):
         """Update simulation context parameters based on new replica assignment."""
@@ -311,24 +312,13 @@ class OMMFFReplica(OMMFF):
     def _save_swap_results(self, replica_rank_new):
         """Save replica ranks and swap rates to HDF5 files."""
         with h5py.File("replica_ranks.h5", "a") as f:
-            if len(f.keys()) == 0:
-                f.create_dataset(
-                    f"config_{self.count}_{len(f.keys())}",
-                    data=replica_rank_new,
-                )
-            else:
-                dset_name = f"config_{self.count}_{len(f.keys())}"
-                f.create_dataset(dset_name, data=replica_rank_new)
+            dset_name = f"config_{self.count}_{len(f.keys())}"
+            f.create_dataset(dset_name, data=replica_rank_new)
 
         with h5py.File("swap_rates.h5", "a") as f:
-            if len(f.keys()) == 0:
-                group = f.create_group(f"config_{self.count}_{len(f.keys())}")
-                group.create_dataset("num_accepted", data=self.num_accepted)
-                group.create_dataset("num_attempted", data=self.num_attempted)
-            else:
-                group = f.create_group(f"config_{self.count}_{len(f.keys())}")
-                group.create_dataset("num_accepted", data=self.num_accepted)
-                group.create_dataset("num_attempted", data=self.num_attempted)
+            group = f.create_group(f"config_{self.count}_{len(f.keys())}")
+            group.create_dataset("num_accepted", data=self.num_accepted)
+            group.create_dataset("num_attempted", data=self.num_attempted)
 
     def _perform_replica_swap(self, cvs):
         """Perform replica exchange swap attempt."""
@@ -447,6 +437,7 @@ def mix_replicas(
     return replica_rank, num_accepted, num_attempted
 
 
+@numba.njit
 def mix_neighboring_replicas(
     beta,
     cvs_all,

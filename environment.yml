@@ -1,0 +1,7 @@
+name: omm_fts
+channels:
+  - conda-forge
+  - default
+  - omnia
+dependencies:
+  - openmmtools
