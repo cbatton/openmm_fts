@@ -1,10 +1,10 @@
+"""A class to write trajectory data to a file in HDF5 format."""
+
 import h5py
 
 
 class TrajWriter:
-    """
-    Class to write trajectory data to a file.
-    """
+    """Class to write trajectory data to a file."""
 
     def __init__(
         self, filename, num_atoms, num_frames, precision=32, cvs=None, rank=None
@@ -55,7 +55,7 @@ class TrajWriter:
             "cell", (self.num_frames, 3, 3), dtype=precision_str, chunks=(1, 3, 3)
         )
         if cvs is not None:
-            for i, cv in enumerate(cvs):
+            for i in range(len(cvs)):
                 self.file.create_dataset(
                     f"cv_{i}", (self.num_frames, 1), dtype=precision_str, chunks=(1, 1)
                 )
@@ -76,6 +76,7 @@ class TrajWriter:
         cvs=None,
         rank=None,
     ):
+        """Write a single frame of trajectory data to the file."""
         self.file["positions"][self.frame] = positions
         self.file["velocities"][self.frame] = velocities
         self.file["forces"][self.frame] = forces
@@ -90,10 +91,11 @@ class TrajWriter:
         self.frame += 1
 
     def close(self):
+        """Close the trajectory file."""
         self.file.close()
 
     def early_close(self):
-        # Resize the datasets to the number of frames written
+        """Close the trajectory file early, resizing datasets to the number of frames written."""
         self.file["positions"].resize(self.frame, axis=0)
         self.file["velocities"].resize(self.frame, axis=0)
         self.file["forces"].resize(self.frame, axis=0)
@@ -101,7 +103,7 @@ class TrajWriter:
         self.file["ke"].resize(self.frame, axis=0)
         self.file["cell"].resize(self.frame, axis=0)
         if self.cvs is not None:
-            for i, cv in enumerate(self.cvs):
+            for i in range(len(self.cvs)):
                 self.file[f"cv_{i}"].resize(self.frame, axis=0)
         if self.rank is not None:
             self.file["rank"].resize(self.frame, axis=0)

@@ -7,6 +7,7 @@ import h5py
 import numba
 import numpy as np
 from mdtraj.reporters import HDF5Reporter
+from omm import OMMFF
 from openmm.unit import (
     AVOGADRO_CONSTANT_NA,
     BOLTZMANN_CONSTANT_kB,
@@ -14,8 +15,6 @@ from openmm.unit import (
     md_unit_system,
     picoseconds,
 )
-
-from omm import OMMFF
 from traj_writer import TrajWriter
 
 

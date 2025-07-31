@@ -18,7 +18,7 @@ from openmm.unit import kelvin, kilojoule, md_unit_system, mole, nanometers, pic
 from openmm_csvr.csvr import CSVRIntegrator
 from scipy.interpolate import interp1d
 
-from traj_writer import TrajWriter
+from ..io.traj_writer import TrajWriter
 
 
 class OMMFF:

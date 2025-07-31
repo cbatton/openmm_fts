@@ -24,7 +24,6 @@ dependencies = [
     "numba",
     "mdtraj",
     "openmm",
-    "openmmtools",
     "openmm_csvr @ git+https://github.com/cbatton/openmm_csvr.git",
     "mpi4py",
 ]

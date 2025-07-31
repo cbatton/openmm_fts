@@ -10,10 +10,9 @@ import openmm.unit as u
 
 # Import MPI
 from mpi4py import MPI
+from omm_replica import OMMFF
 from openmm.openmm import CustomCVForce, CustomTorsionForce
 from openmmtools import testsystems
-
-from omm_replica import OMMFF
 
 
 def natural_sort(items):
