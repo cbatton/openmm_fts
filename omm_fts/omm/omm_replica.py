@@ -282,17 +282,17 @@ class OMMFFReplica(OMMFF):
         self.simulation.reporters[1].close()
         h5_file.early_close()
 
-        def _gather_replica_data(self, cvs):
-            """Gather collective variables and replica ranks from all processes."""
-            cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
-            self.comm.Allgather(cvs, cvs_all)
+    def _gather_replica_data(self, cvs):
+        """Gather collective variables and replica ranks from all processes."""
+        cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
+        self.comm.Allgather(cvs, cvs_all)
 
-            replica_rank_all = np.zeros(self.size, dtype=np.int64)
-            self.comm.Allgather(
-                np.array(self.replica_rank, dtype=np.int64), replica_rank_all
-            )
+        replica_rank_all = np.zeros(self.size, dtype=np.int64)
+        self.comm.Allgather(
+            np.array(self.replica_rank, dtype=np.int64), replica_rank_all
+        )
 
-            return cvs_all, replica_rank_all
+        return cvs_all, replica_rank_all
 
     def _update_replica_parameters(self, replica_rank_new):
         """Update simulation context parameters based on new replica assignment."""

@@ -10,7 +10,7 @@ import openmm.unit as u
 
 # Import MPI
 from mpi4py import MPI
-from omm_replica import OMMFF
+from omm import OMMFFReplica
 from openmm.openmm import CustomCVForce, CustomTorsionForce
 from openmmtools import testsystems
 
@@ -116,7 +116,7 @@ positions = traj_init[rank]
 ala2.positions = positions
 print(ala2.positions)
 
-omm_ff = OMMFF(
+omm_ff = OMMFFReplica(
     ala2,
     platform="CPU",
     seed=seed + 1,

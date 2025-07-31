@@ -3,7 +3,8 @@
 __version__ = "0.1.0"
 
 from .io import TrajWriter
-from .omm import OMMFF, OMMFFReplica
+from .omm.omm_fts import OMMFF
+from .omm.omm_replica import OMMFFReplica
 
 __all__ = [
     "OMMFF",
