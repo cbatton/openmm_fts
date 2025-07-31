@@ -33,13 +33,16 @@ files = glob.glob(f"{files_to_convert}*.h5")
 files = [file for file in files if "data" not in file]
 
 
-def natural_sort(l):  # noqa: E741
-    """Applies a natural sort to a list of strings."""
-    convert = lambda text: int(text) if text.isdigit() else text.lower()  # noqa: E731
-    alphanum_key = lambda key: [  # noqa: E731
-        convert(c) for c in re.split("([0-9]+)", key)
-    ]
-    return sorted(l, key=alphanum_key)
+def natural_sort(items):
+    """Performing a natural sort on a list of strings."""
+
+    def convert(text):
+        return int(text) if text.isdigit() else text.lower()
+
+    def alphanum_key(key):
+        return [convert(c) for c in re.split("([0-9]+)", key)]
+
+    return sorted(items, key=alphanum_key)
 
 
 files = natural_sort(files)
