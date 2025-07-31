@@ -12,6 +12,7 @@ from openmm import (
     CMMotionRemover,
     LangevinMiddleIntegrator,
     Platform,
+    VerletIntegrator,
 )
 from openmm.app import CheckpointReporter, Simulation
 from openmm.unit import kelvin, kilojoule, md_unit_system, mole, nanometers, picoseconds
@@ -202,6 +203,8 @@ class OMMFF:
                 friction,
                 time_step,
             )
+        elif integrator_name == "verlet":
+            integrator = VerletIntegrator(time_step)
         else:
             raise ValueError("Integrator name not recognized")
         integrator.setRandomNumberSeed(seed)

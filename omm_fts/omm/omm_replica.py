@@ -202,7 +202,7 @@ class OMMFFReplica(OMMFF):
         for iteration in range(start_iter, num_data_points):
             if self._should_exit_early(time_start, time_max):
                 self._cleanup_replica_trajectory_files(h5_file)
-                exit(0)
+                return
 
             h5_file = self._run_replica_trajectory_iteration(
                 iteration, save_freq, tag, h5_file, h5_freq, precision, swap_freq
@@ -310,24 +310,13 @@ class OMMFFReplica(OMMFF):
     def _save_swap_results(self, replica_rank_new):
         """Save replica ranks and swap rates to HDF5 files."""
         with h5py.File("replica_ranks.h5", "a") as f:
-            if len(f.keys()) == 0:
-                f.create_dataset(
-                    f"config_{self.count}_{len(f.keys())}",
-                    data=replica_rank_new,
-                )
-            else:
-                dset_name = f"config_{self.count}_{len(f.keys())}"
-                f.create_dataset(dset_name, data=replica_rank_new)
+            dset_name = f"config_{self.count}_{len(f.keys())}"
+            f.create_dataset(dset_name, data=replica_rank_new)
 
         with h5py.File("swap_rates.h5", "a") as f:
-            if len(f.keys()) == 0:
-                group = f.create_group(f"config_{self.count}_{len(f.keys())}")
-                group.create_dataset("num_accepted", data=self.num_accepted)
-                group.create_dataset("num_attempted", data=self.num_attempted)
-            else:
-                group = f.create_group(f"config_{self.count}_{len(f.keys())}")
-                group.create_dataset("num_accepted", data=self.num_accepted)
-                group.create_dataset("num_attempted", data=self.num_attempted)
+            group = f.create_group(f"config_{self.count}_{len(f.keys())}")
+            group.create_dataset("num_accepted", data=self.num_accepted)
+            group.create_dataset("num_attempted", data=self.num_attempted)
 
     def _perform_replica_swap(self, cvs):
         """Perform replica exchange swap attempt."""
@@ -446,6 +435,7 @@ def mix_replicas(
     return replica_rank, num_accepted, num_attempted
 
 
+@numba.njit
 def mix_neighboring_replicas(
     beta,
     cvs_all,

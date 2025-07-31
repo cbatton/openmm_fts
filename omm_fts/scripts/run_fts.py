@@ -29,23 +29,16 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# Run MPI umbrella sampling simulation
 parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
 parser.add_argument(
     "--integrator", type=str, help="Integrator to use", default="csvr_leapfrog"
 )
-parser.add_argument("--opes_type", type=str, help="Type of OPES", default="OPES_METAD")
 parser.add_argument("--seed", type=int, help="Seed for the simulation", default=rank)
 
 args = parser.parse_args()
 integrator = args.integrator
-opes_type = args.opes_type
 seed = args.seed
 
-if opes_type not in ["OPES_METAD", "OPES_METAD_EXPLORE"]:
-    raise ValueError("OPES type must be OPES_METAD or OPES_METAD_EXPLORE")
-
-# Have Ar units for WCA
 temperature = 300 * u.kelvin
 print(temperature)
 
@@ -83,12 +76,9 @@ cv0_bias = CustomCVForce(
     "0.5 * kphi * delta^2; delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), abs(theta - phi0 - 2*pi)); pi=3.141592653589793"
 )
 kphi = 250 * u.kilojoules_per_mole / u.radian**2
-# phi0_start = -3 * u.radian
 phi0_start = -2.51 * u.radian
 phi0_end = 0.82 * u.radian
 phi0 = phi0_start + (phi0_end - phi0_start) * rank / (size - 1)
-# if rank == 0:
-# phi0 = -3.00 * u.radian
 cv0_bias.addCollectiveVariable("theta", cv0_record)
 cv0_bias.addGlobalParameter("kphi", kphi)
 cv0_bias.addGlobalParameter("phi0", phi0)
@@ -99,12 +89,9 @@ cv1_bias = CustomCVForce(
     "0.5 * kpsi * delta^2; delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), abs(theta - psi0 - 2*pi)); pi=3.141592653589793"
 )
 kpsi = 250 * u.kilojoules_per_mole / u.radian**2
-# psi0_start = -3 * u.radian
 psi0_start = 2.83 * u.radian
 psi0_end = -1.88 * u.radian
 psi0 = psi0_start + (psi0_end - psi0_start) * rank / (size - 1)
-# if rank == 0:
-# psi0 = -3.00 * u.radian
 cv1_bias.addCollectiveVariable("theta", cv1_record)
 cv1_bias.addGlobalParameter("kpsi", kpsi)
 cv1_bias.addGlobalParameter("psi0", psi0)
