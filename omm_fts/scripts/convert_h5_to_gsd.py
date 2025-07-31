@@ -2,12 +2,13 @@
 
 import argparse
 import glob
-import re
 
 import gsd
 import gsd.hoomd
 import mdtraj as md
 import numpy as np
+
+from omm_fts.utils.natural_sort import natural_sort
 
 
 def boolean_string(s):
@@ -31,18 +32,6 @@ include_last = args.include_last
 # gather all files that end with h5 and don't have "data" in them
 files = glob.glob(f"{files_to_convert}*.h5")
 files = [file for file in files if "data" not in file]
-
-
-def natural_sort(items):
-    """Performing a natural sort on a list of strings."""
-
-    def convert(text):
-        return int(text) if text.isdigit() else text.lower()
-
-    def alphanum_key(key):
-        return [convert(c) for c in re.split("([0-9]+)", key)]
-
-    return sorted(items, key=alphanum_key)
 
 
 files = natural_sort(files)

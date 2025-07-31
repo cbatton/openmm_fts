@@ -7,7 +7,6 @@ import h5py
 import numba
 import numpy as np
 from mdtraj.reporters import HDF5Reporter
-from omm import OMMFF
 from openmm.unit import (
     AVOGADRO_CONSTANT_NA,
     BOLTZMANN_CONSTANT_kB,
@@ -15,7 +14,9 @@ from openmm.unit import (
     md_unit_system,
     picoseconds,
 )
-from traj_writer import TrajWriter
+
+from ..io.traj_writer import TrajWriter
+from .omm_fts import OMMFF
 
 
 class OMMFFReplica(OMMFF):
@@ -67,7 +68,7 @@ class OMMFFReplica(OMMFF):
             update_ends=True,  # Not used in replica exchange
             comm=comm,
             minimize_init=False,  # Not used in replica exchange
-            minimize_final=False,  # Not used in replica exchange
+            minimize_intervals=None,  # Not used in replica exchange
         )
 
         # Initialize replica-specific attributes
@@ -202,6 +203,7 @@ class OMMFFReplica(OMMFF):
         for iteration in range(start_iter, num_data_points):
             if self._should_exit_early(time_start, time_max):
                 self._cleanup_replica_trajectory_files(h5_file)
+                self.comm.Barrier()
                 return
 
             h5_file = self._run_replica_trajectory_iteration(

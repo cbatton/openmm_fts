@@ -24,8 +24,12 @@ class TrajWriter:
 
         if cvs is not None:
             self.cvs = cvs
+        else:
+            self.cvs = None
         if rank is not None:
             self.rank = rank
+        else:
+            self.rank = None
 
         self.file.create_dataset(
             "positions",
@@ -54,12 +58,12 @@ class TrajWriter:
         self.file.create_dataset(
             "cell", (self.num_frames, 3, 3), dtype=precision_str, chunks=(1, 3, 3)
         )
-        if cvs is not None:
+        if self.cvs is not None:
             for i in range(len(cvs)):
                 self.file.create_dataset(
                     f"cv_{i}", (self.num_frames, 1), dtype=precision_str, chunks=(1, 1)
                 )
-        if rank is not None:
+        if self.rank is not None:
             self.file.create_dataset(
                 "rank", (self.num_frames, 1), dtype="i4", chunks=(1, 1)
             )

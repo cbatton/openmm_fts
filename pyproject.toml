@@ -33,6 +33,7 @@ dependencies = [
 omm-fts = "omm_fts.scripts.run_fts:main"
 omm-replica = "omm_fts.scripts.run_replica:main"
 omm-convert = "omm_fts.scripts.convert_h5_to_gsd:main"
+omm-interpolate-string = "omm_fts.scripts.interpolate_string:main"
 
 [tool.setuptools]
 packages = ["omm_fts"]
