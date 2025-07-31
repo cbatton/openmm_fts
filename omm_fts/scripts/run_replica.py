@@ -34,11 +34,18 @@ def main():
         help="String file to use",
         default="ala2_interpolated_string.h5",
     )
+    parser.add_argument(
+        "--num_data_points",
+        type=int,
+        help="Number of data points to collect",
+        default=1000,
+    )
 
     args = parser.parse_args()
     integrator = args.integrator
     seed = args.seed
     string_file = args.string_file
+    num_data_points = args.num_data_points
 
     temperature = 300 * u.kelvin
     print(temperature)
@@ -123,7 +130,11 @@ def main():
     if rank == 0:
         print("Starting simulation")
     omm_ff.generate_long_trajectory(
-        num_data_points=1000, burn_in=0, save_freq=100, h5_freq=10, swap_freq=20
+        num_data_points=num_data_points,
+        burn_in=0,
+        save_freq=100,
+        h5_freq=10,
+        swap_freq=20,
     )
 
 

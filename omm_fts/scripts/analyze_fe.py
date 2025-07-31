@@ -37,7 +37,6 @@ def main():
     string_file = args.string_file
     burn_in = args.burn_in
     num_bootstrap = args.num_bootstrap
-    num_bootstrap += 1
 
     # now to load in files
     with h5py.File(string_file, "r") as f:
@@ -68,32 +67,36 @@ def main():
     cv_data = cv_data.reshape(-1, 2)
     rank = rank.reshape(-1)
 
-    cvs_average = np.zeros((num_folders, 2))
-    for i in range(num_folders):
-        cvs_average[i, :] = np.mean(cv_data[rank == i, :], axis=0)
-
     # free energy along collective variables
     k_values = np.array([250, 250])
-    df_dz = k_values * (cvs_string - cvs_average)
-
-    # now to obtain the free energy along the string
-    t_spline = np.linspace(0, 1, cvs_string.shape[0])
-    cvs_spline = CubicSpline(t_spline, cvs_string)
-    cvs_spline_prime = cvs_spline.derivative()
-    cvs_prime = cvs_spline_prime(t_spline)
-    df_ds = df_dz * cvs_prime
-    df_ds = np.sum(df_ds, axis=1)
-    integral = cumulative_simpson(y=df_ds, x=t_spline)
-    integral = np.append(0, integral)
+    integral_bs = []
+    for _ in range(num_bootstrap):
+        cvs_average = np.zeros((num_folders, 2))
+        for i in range(num_folders):
+            indices = np.where(rank == i)[0]
+            indices = np.random.choice(indices, size=len(indices), replace=True)
+            cvs_average[i, :] = np.mean(cv_data[indices], axis=0)
+        df_dz = k_values * (cvs_string - cvs_average)
+        # now to obtain the free energy along the string
+        t_spline = np.linspace(0, 1, cvs_string.shape[0])
+        cvs_spline = CubicSpline(t_spline, cvs_string)
+        cvs_spline_prime = cvs_spline.derivative()
+        cvs_prime = cvs_spline_prime(t_spline)
+        df_ds = df_dz * cvs_prime
+        df_ds = np.sum(df_ds, axis=1)
+        integral = cumulative_simpson(y=df_ds, x=t_spline)
+        integral = np.append(0, integral)
+        integral_bs.append(integral)
+    integral_bs = np.array(integral_bs)
+    integral_bs_mean = np.mean(integral_bs, axis=0)
+    integral_bs_std = np.std(integral_bs, axis=0)
 
     # save to h5 file
     with h5py.File("ala2_free_energy.h5", "w") as f:
         f.create_dataset("cvs", data=cvs_string)
-        f.create_dataset("cvs_average", data=cvs_average)
-        f.create_dataset("df_dz", data=df_dz)
-        f.create_dataset("df_ds", data=df_ds)
-        f.create_dataset("fe", data=integral)
         f.create_dataset("t_spline", data=t_spline)
+        f.create_dataset("fe_mean", data=integral_bs_mean)
+        f.create_dataset("fe_std", data=integral_bs_std)
 
 
 if __name__ == "__main__":
