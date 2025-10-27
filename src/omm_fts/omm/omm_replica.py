@@ -15,8 +15,8 @@ from openmm.unit import (
     picoseconds,
 )
 
-from ..io.traj_writer import TrajWriter
-from .omm_fts import OMMFF
+from omm_fts.io.traj_writer import TrajWriter
+from omm_fts.omm.omm_fts import OMMFF
 
 
 class OMMFFReplica(OMMFF):
@@ -381,15 +381,21 @@ def mix_replicas(
 
     Arguments:
         beta: A float corresponding to the inverse temperature
-        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
-        parameter_values: A numpy array of shape (n_replicas, n_parameters) corresponding to the parameter values of all replicas
-        force_values: A numpy array of shape (n_replicas, n_forces) corresponding to the force values of all replicas
+        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding
+            to the collective variables of all replicas
+        parameter_values: A numpy array of shape (n_replicas, n_parameters)
+            corresponding to the parameter values of all replicas
+        force_values: A numpy array of shape (n_replicas, n_forces)
+            corresponding to the force values of all replicas
         replica_rank: An int corresponding to the rank of the current replica
         nswap_attemps: An int specifying the number of swap attempts
     Returns:
-        replica_rank: An int corresponding to the new rank of the replica after mixing
-        num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
-        num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
+        replica_rank: An int corresponding to the new rank of the replica
+            after mixing
+        num_accepted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of accepted swaps between replicas
+        num_attempted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of attempted swaps between replicas
     """
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]
@@ -449,14 +455,20 @@ def mix_neighboring_replicas(
 
     Arguments:
         beta: A float corresponding to the inverse temperature
-        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
-        parameter_values: A numpy array of shape (n_replicas, n_parameters) corresponding to the parameter values of all replicas
-        force_values: A numpy array of shape (n_replicas, n_forces) corresponding to the force values of all replicas
+        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding
+            to the collective variables of all replicas
+        parameter_values: A numpy array of shape (n_replicas, n_parameters)
+            corresponding to the parameter values of all replicas
+        force_values: A numpy array of shape (n_replicas, n_forces)
+            corresponding to the force values of all replicas
         replica_rank: An int corresponding to the rank of the current replica
     Returns:
-        replica_rank: An int corresponding to the new rank of the replica after mixing
-        num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
-        num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
+        replica_rank: An int corresponding to the new rank of the replica
+            after mixing
+        num_accepted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of accepted swaps between replicas
+        num_attempted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of attempted swaps between replicas
     """
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]

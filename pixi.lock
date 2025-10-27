@@ -5571,7 +5571,7 @@ packages:
 - pypi: ./
   name: openmm-fts
   version: 0.1.0
-  sha256: 70ae5c89d8084dd0ff3828f36393a49c1c42eab03d7948b5bd8e694d5e9aa570
+  sha256: 228d0450d1f550b2884b453c13057f741490654853215b7cb5eb1d417c303ef1
   requires_dist:
   - numpy
   - scipy

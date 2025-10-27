@@ -30,6 +30,7 @@ repos:
     language: system
     entry: pixi run types
     types: [python]
+    pass_filenames: false
 
   - id: pytest-fast
     name: pytest-fast

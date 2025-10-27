@@ -84,7 +84,10 @@ def main():
     cv0_record = CustomTorsionForce("theta")
     cv0_record.addTorsion(4, 6, 8, 14)
     cv0_bias = CustomCVForce(
-        "0.5 * kphi * delta^2; delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), abs(theta - phi0 - 2*pi)); pi=3.141592653589793"
+        "0.5 * kphi * delta^2; "
+        "delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), "
+        "abs(theta - phi0 - 2*pi)); "
+        "pi=3.141592653589793"
     )
     kphi = 250 * u.kilojoules_per_mole / u.radian**2
     cv0_bias.addCollectiveVariable("theta", cv0_record)
@@ -94,7 +97,10 @@ def main():
     cv1_record = CustomTorsionForce("theta")
     cv1_record.addTorsion(6, 8, 14, 16)
     cv1_bias = CustomCVForce(
-        "0.5 * kpsi * delta^2; delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), abs(theta - psi0 - 2*pi)); pi=3.141592653589793"
+        "0.5 * kpsi * delta^2; "
+        "delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), "
+        "abs(theta - psi0 - 2*pi)); "
+        "pi=3.141592653589793"
     )
     kpsi = 250 * u.kilojoules_per_mole / u.radian**2
     cv1_bias.addCollectiveVariable("theta", cv1_record)

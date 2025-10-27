@@ -15,7 +15,7 @@ def boolean_string(s):
     """Convert a string to a boolean value."""
     if s not in {"False", "True", "false", "true"}:
         raise ValueError("Not a valid boolean string")
-    return s == "True" or s == "true"
+    return s in {"True", "true"}
 
 
 # Load in h5 files, convert to gsd

@@ -1,35 +1,42 @@
 """A class to write trajectory data to a file in HDF5 format."""
 
-import h5py
+from typing import Any
+
+import h5py  # type: ignore[import-untyped]
+from numpy.typing import NDArray
+
+# Constants for precision
+PRECISION_32 = 32
+PRECISION_64 = 64
 
 
 class TrajWriter:
     """Class to write trajectory data to a file."""
 
     def __init__(
-        self, filename, num_atoms, num_frames, precision=32, cvs=None, rank=None
-    ):
+        self,
+        filename: str,
+        num_atoms: int,
+        num_frames: int,
+        precision: int = 32,
+        cvs: list[Any] | None = None,
+        rank: bool | None = None,
+    ) -> None:
         self.filename = filename
         self.num_atoms = num_atoms
         self.num_frames = num_frames
         self.precision = precision
-        self.file = h5py.File(self.filename, "w")
+        self.file: h5py.File = h5py.File(self.filename, "w")
 
-        if self.precision == 32:
+        if self.precision == PRECISION_32:
             precision_str = "f4"
-        elif self.precision == 64:
+        elif self.precision == PRECISION_64:
             precision_str = "f8"
         else:
             raise ValueError("Precision must be 32 or 64")
 
-        if cvs is not None:
-            self.cvs = cvs
-        else:
-            self.cvs = None
-        if rank is not None:
-            self.rank = rank
-        else:
-            self.rank = None
+        self.cvs = cvs
+        self.rank = rank
 
         self.file.create_dataset(
             "positions",
@@ -59,7 +66,7 @@ class TrajWriter:
             "cell", (self.num_frames, 3, 3), dtype=precision_str, chunks=(1, 3, 3)
         )
         if self.cvs is not None:
-            for i in range(len(cvs)):
+            for i in range(len(cvs)):  # type: ignore[arg-type]
                 self.file.create_dataset(
                     f"cv_{i}", (self.num_frames, 1), dtype=precision_str, chunks=(1, 1)
                 )
@@ -71,15 +78,15 @@ class TrajWriter:
 
     def write_frame(
         self,
-        positions,
-        velocities,
-        forces,
-        pe,
-        ke,
-        cell,
-        cvs=None,
-        rank=None,
-    ):
+        positions: NDArray[Any],
+        velocities: NDArray[Any],
+        forces: NDArray[Any],
+        pe: float,
+        ke: float,
+        cell: NDArray[Any],
+        cvs: list[float] | NDArray[Any] | None = None,
+        rank: int | None = None,
+    ) -> None:
         """Write a single frame of trajectory data to the file."""
         self.file["positions"][self.frame] = positions
         self.file["velocities"][self.frame] = velocities
@@ -94,12 +101,15 @@ class TrajWriter:
             self.file["rank"][self.frame] = rank
         self.frame += 1
 
-    def close(self):
+    def close(self) -> None:
         """Close the trajectory file."""
         self.file.close()
 
-    def early_close(self):
-        """Close the trajectory file early, resizing datasets to the number of frames written."""
+    def early_close(self) -> None:
+        """Close the trajectory file early.
+
+        Resizes datasets to the number of frames written.
+        """
         self.file["positions"].resize(self.frame, axis=0)
         self.file["velocities"].resize(self.frame, axis=0)
         self.file["forces"].resize(self.frame, axis=0)

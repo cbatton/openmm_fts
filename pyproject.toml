@@ -58,7 +58,7 @@ ignore = [
 convention = "google"
 
 [tool.mypy]
-files = ["omm_fts"]
+files = ["src/omm_fts"]
 strict = true
 pretty = true
 

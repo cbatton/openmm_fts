@@ -19,7 +19,7 @@ from openmm.unit import kelvin, kilojoule, md_unit_system, mole, nanometers, pic
 from openmm_csvr.csvr import CSVRIntegrator
 from scipy.interpolate import interp1d
 
-from ..io.traj_writer import TrajWriter
+from omm_fts.io.traj_writer import TrajWriter
 
 
 class OMMFF:
@@ -272,7 +272,8 @@ class OMMFF:
             if minimize_init:
                 minimize_intervals = int(minimize_intervals)
                 # slowly initialize
-                # Get currents cvs0, see where they need to be, and then get there in minimize_intervals number of steps
+                # Get currents cvs0, see where they need to be, and then
+                # get there in minimize_intervals number of steps
                 _, _, _, _, _, _, cvs0 = self.get_information()
                 cvs0_target = []
                 for i in range(len(self.parameter_name)):
@@ -281,7 +282,15 @@ class OMMFF:
                     )
                 cvs0_target = np.array(cvs0_target)
                 print(
-                    f"Before minimization on {self.rank}: current CV values: {cvs0}, target CV values: {cvs0_target}"
+                    f"Before minimization on {self.rank}: "
+                    f"current CV values: {cvs0}, "
+                    f"target CV values: {cvs0_target}"
+                )
+                _, _, _, _, _, _, cvs0 = self.get_information()
+                print(
+                    f"After minimization on {self.rank}: "
+                    f"current CV values: {cvs0}, "
+                    f"target CV values: {cvs0_target}"
                 )
                 cvs0_spline = np.zeros((minimize_intervals + 1, len(cvs0)))
                 for i in range(len(cvs0)):
@@ -299,7 +308,9 @@ class OMMFF:
                     )
                 _, _, _, _, _, _, cvs0 = self.get_information()
                 print(
-                    f"After minimization on {self.rank}: current CV values: {cvs0}, target CV values: {cvs0_target}"
+                    f"After minimization on {self.rank}: "
+                    f"current CV values: {cvs0}, "
+                    f"target CV values: {cvs0_target}"
                 )
             else:
                 self.simulation.minimizeEnergy()
@@ -346,15 +357,21 @@ class OMMFF:
 
         Arguments:
             as_numpy: A boolean of whether to return as a numpy array
-            enforce_periodic_box: A boolean of whether to enforce periodic boundary conditions
+            enforce_periodic_box: A boolean of whether to enforce periodic
+                boundary conditions
         Returns:
-            positions: A numpy array of shape (n_atoms, 3) corresponding to the positions in nm
-            velocities: A numpy array of shape (n_atoms, 3) corresponding to the velocities in nm/ps
-            forces: A numpy array of shape (n_atoms, 3) corresponding to the force in kJ/mol*nm
+            positions: A numpy array of shape (n_atoms, 3) corresponding to
+                the positions in nm
+            velocities: A numpy array of shape (n_atoms, 3) corresponding to
+                the velocities in nm/ps
+            forces: A numpy array of shape (n_atoms, 3) corresponding to
+                the force in kJ/mol*nm
             pe: A float coressponding to the potential energy in kJ/mol
             ke: A float coressponding to the kinetic energy in kJ/mol
-            cell: A numpy array of shape (3, 3) corresponding to the cell vectors in nm
-            cvs: A list of numpy arrays of shape (n_cvs,) corresponding to the collective variables
+            cell: A numpy array of shape (3, 3) corresponding to the cell
+                vectors in nm
+            cvs: A list of numpy arrays of shape (n_cvs,) corresponding to
+                the collective variables
         """
         state = self.simulation.context.getState(
             getForces=True,
@@ -858,10 +875,14 @@ def thomas_inverse_batch_d(a, b, c, d):
     all systems but d varies.
 
     Arguments:
-        a: A 1D numpy array of shape (n-1,) corresponding to the sub-diagonal of the tridiagonal matrix
-        b: A 1D numpy array of shape (n,) corresponding to the diagonal of the tridiagonal matrix
-        c: A 1D numpy array of shape (n-1,) corresponding to the super-diagonal of the tridiagonal matrix
-        d: A 2D numpy array of shape (n, b) where n is the number of equations and b is the batch size
+        a: A 1D numpy array of shape (n-1,) corresponding to the
+            sub-diagonal of the tridiagonal matrix
+        b: A 1D numpy array of shape (n,) corresponding to the diagonal
+            of the tridiagonal matrix
+        c: A 1D numpy array of shape (n-1,) corresponding to the
+            super-diagonal of the tridiagonal matrix
+        d: A 2D numpy array of shape (n, b) where n is the number of
+            equations and b is the batch size
     """  # noqa: D205
     n = b.shape[0]
     bs = d.shape[1]  # Batch size
