@@ -3,24 +3,27 @@
 import argparse
 from pathlib import Path
 
-import openmm.unit as u
+import openmm.unit as u  # type: ignore[import-untyped]
 
 # Import MPI
 from mpi4py import MPI
-from openmm.openmm import CustomCVForce, CustomTorsionForce
-from openmmtools import testsystems
+from openmm.openmm import (  # type: ignore[import-untyped]
+    CustomCVForce,
+    CustomTorsionForce,
+)
+from openmmtools import testsystems  # type: ignore[import-untyped]
 
 from omm_fts.omm.omm_fts import OMMFF
 
 
-def main():
+def main() -> None:
     """Main function to run the finite-temperature string method.
 
     Runs on alanine dipeptide.
     """
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    rank: int = comm.Get_rank()
+    size: int = comm.Get_size()
 
     parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
     parser.add_argument(
@@ -31,8 +34,8 @@ def main():
     )
 
     args = parser.parse_args()
-    integrator = args.integrator
-    seed = args.seed
+    integrator: str = args.integrator
+    seed: int = args.seed
 
     temperature = 300 * u.kelvin
     print(temperature)
@@ -64,16 +67,16 @@ def main():
     # prepare more traditional biasing variables
     cv0_record = CustomTorsionForce("theta")
     cv0_record.addTorsion(4, 6, 8, 14)
-    kphi = 250 * u.kilojoules_per_mole / u.radian**2
-    phi0_start = -2.51 * u.radian
-    phi0_end = 0.82 * u.radian
-    phi0 = phi0_start + (phi0_end - phi0_start) * rank / (size - 1)
     cv0_bias = CustomCVForce(
         "0.5 * kphi * delta^2; "
         "delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), "
         "abs(theta - phi0 - 2*pi)); "
         "pi=3.141592653589793"
     )
+    kphi = 250 * u.kilojoules_per_mole / u.radian**2
+    phi0_start = -2.51 * u.radian
+    phi0_end = 0.82 * u.radian
+    phi0 = phi0_start + (phi0_end - phi0_start) * rank / (size - 1)
     cv0_bias.addCollectiveVariable("theta", cv0_record)
     cv0_bias.addGlobalParameter("kphi", kphi)
     cv0_bias.addGlobalParameter("phi0", phi0)

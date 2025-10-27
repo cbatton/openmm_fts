@@ -2,23 +2,30 @@
 
 import argparse
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-import h5py
+import h5py  # type: ignore[import-untyped]
 import numpy as np
-import openmm.unit as u
+import openmm.unit as u  # type: ignore[import-untyped]
 
 # Import MPI
 from mpi4py import MPI
-from openmm.openmm import CustomCVForce, CustomTorsionForce
-from openmmtools import testsystems
+from openmm.openmm import (  # type: ignore[import-untyped]
+    CustomCVForce,
+    CustomTorsionForce,
+)
+from openmmtools import testsystems  # type: ignore[import-untyped]
 
 from omm_fts.omm.omm_replica import OMMFFReplica
 
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
-def main():
+
+def main() -> None:
     """Run the Hamiltonian replica-exchange simulation."""
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
+    rank: int = comm.Get_rank()
 
     # Run MPI umbrella sampling simulation
     parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
@@ -42,10 +49,10 @@ def main():
     )
 
     args = parser.parse_args()
-    integrator = args.integrator
-    seed = args.seed
-    string_file = args.string_file
-    num_data_points = args.num_data_points
+    integrator: str = args.integrator
+    seed: int = args.seed
+    string_file: str = args.string_file
+    num_data_points: int = args.num_data_points
 
     temperature = 300 * u.kelvin
     print(temperature)
@@ -76,7 +83,7 @@ def main():
 
     # read values from restart
     with h5py.File(string_file, "r") as f:
-        cvs = f["cvs"][:]
+        cvs: NDArray[Any] = f["cvs"][:]
         phi0 = cvs[rank, 0] * u.radian
         psi0 = cvs[rank, 1] * u.radian
 
@@ -111,7 +118,7 @@ def main():
     parameter_name = ["phi0", "psi0"]
     force_parameter_name = ["kphi", "kpsi"]
 
-    traj_init = np.load("ala2_initial_positions.npy")
+    traj_init: NDArray[Any] = np.load("ala2_initial_positions.npy")
     positions = traj_init[rank]
     ala2.positions = positions
 
