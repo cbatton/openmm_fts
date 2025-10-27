@@ -81,10 +81,12 @@ class OMMFF:
 
         # get number of atoms, masses of the atoms
         self.num_atoms = len(system.positions)
-        self.masses = np.array([
-            system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
-            for i in range(self.num_atoms)
-        ])
+        self.masses = np.array(
+            [
+                system.system.getParticleMass(i).value_in_unit_system(md_unit_system)
+                for i in range(self.num_atoms)
+            ]
+        )
         self._initialize_simulation(
             system,
             integrator,
