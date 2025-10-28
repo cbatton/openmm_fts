@@ -36,7 +36,7 @@ repos:
     name: pytest-fast
     stages: [pre-push]
     language: system
-    entry: pixi run pytest tests/ -m "unit"
+    entry: pixi run pytest tests/
     pass_filenames: false
     require_serial: true
     always_run: true
