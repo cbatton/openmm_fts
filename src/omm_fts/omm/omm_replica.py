@@ -2,12 +2,14 @@
 
 import time
 from pathlib import Path
+from typing import Any
 
-import h5py
-import numba
+import h5py  # type: ignore[import-untyped]
+import numba  # type: ignore[import-untyped]
 import numpy as np
-from mdtraj.reporters import HDF5Reporter
-from openmm.unit import (
+from mdtraj.reporters import HDF5Reporter  # type: ignore[import-untyped]
+from numpy.typing import NDArray
+from openmm.unit import (  # type: ignore[import-untyped]
     AVOGADRO_CONSTANT_NA,
     BOLTZMANN_CONSTANT_kB,
     kelvin,
@@ -15,8 +17,8 @@ from openmm.unit import (
     picoseconds,
 )
 
-from ..io.traj_writer import TrajWriter
-from .omm_fts import OMMFF
+from omm_fts.io.traj_writer import TrajWriter
+from omm_fts.omm.omm_fts import OMMFF
 
 
 class OMMFFReplica(OMMFF):
@@ -24,25 +26,25 @@ class OMMFFReplica(OMMFF):
 
     def __init__(
         self,
-        system,
-        platform="CUDA",
-        precision="single",
-        integrator_name="csvr_leapfrog",
-        temperature=300.0 * kelvin,
-        velocities_com=True,
-        time_step=0.001 * picoseconds,
-        friction=0.1 / picoseconds,
-        seed=1,
-        save_int=10,
-        folder_name="",
-        custom_forces=None,
-        string_forces=None,
-        force_groups=None,
-        parameter_name=None,
-        parameter_force_name=None,
-        comm=None,
-        swap_scheme="mixing",
-    ):
+        system: Any,
+        platform: str = "CUDA",
+        precision: str = "single",
+        integrator_name: str = "csvr_leapfrog",
+        temperature: Any = 300.0 * kelvin,
+        velocities_com: bool = True,
+        time_step: Any = 0.001 * picoseconds,
+        friction: Any = 0.1 / picoseconds,
+        seed: int = 1,
+        save_int: int = 10,
+        folder_name: str = "",
+        custom_forces: Any = None,
+        string_forces: Any = None,
+        force_groups: list[int] | None = None,
+        parameter_name: list[str] | None = None,
+        parameter_force_name: list[str] | None = None,
+        comm: Any = None,
+        swap_scheme: str = "mixing",
+    ) -> None:
         # Initialize parent class
         super().__init__(
             system=system,
@@ -74,7 +76,7 @@ class OMMFFReplica(OMMFF):
         # Initialize replica-specific attributes
         self._setup_swap_scheme(swap_scheme, temperature)
 
-    def _setup_swap_scheme(self, swap_scheme, temperature):
+    def _setup_swap_scheme(self, swap_scheme: str, temperature: Any) -> None:
         """Sets up the swap scheme for the simulation."""
         if swap_scheme not in ["mixing", "neighbors"]:
             raise ValueError(
@@ -83,11 +85,15 @@ class OMMFFReplica(OMMFF):
         self.swap_scheme = swap_scheme
         self.beta = 1.0 / (temperature * BOLTZMANN_CONSTANT_kB * AVOGADRO_CONSTANT_NA)
         self.beta = self.beta.value_in_unit_system(md_unit_system)
-        self.num_attempted = None
-        self.num_accepted = None
+        self.num_attempted: NDArray[Any] | None = None
+        self.num_accepted: NDArray[Any] | None = None
 
         if self.comm is not None:
             self.nswap_attemps = self.size**3
+            assert self.parameter_name is not None, "parameter_name must be set"
+            assert self.parameter_force_name is not None, (
+                "parameter_force_name must be set"
+            )
             self.parameter_values_rank = np.zeros(
                 len(self.parameter_name), dtype=np.float64
             )
@@ -127,7 +133,17 @@ class OMMFFReplica(OMMFF):
                             name, self.force_values[self.replica_rank, i]
                         )
 
-    def get_information(self, as_numpy=True, enforce_periodic_box=True):
+    def get_information(
+        self, as_numpy: bool = True, enforce_periodic_box: bool = True
+    ) -> tuple[
+        NDArray[Any],
+        NDArray[Any],
+        NDArray[Any],
+        float,
+        float,
+        NDArray[Any],
+        list[float],
+    ]:
         """Gets information (positions, forces and PE of system).
 
         Overrides parent method to handle replica-specific CV collection.
@@ -153,40 +169,41 @@ class OMMFFReplica(OMMFF):
             md_unit_system
         )
 
-        cvs = []
+        cvs_list: list[float] = []
         if self.string_forces is not None:
             # turn on track
             self.simulation.context.setParameter("track", 1)
+            assert self.force_groups is not None, "force_groups must be set"
             for i in range(len(self.string_forces)):
                 state = self.simulation.context.getState(
                     getEnergy=True,
                     groups={self.force_groups[i]},
                 )
-                cvs.append(
+                cvs_list.append(
                     state.getPotentialEnergy().value_in_unit_system(md_unit_system)
                 )
 
-            self.cvs_store.append(cvs)
+            self.cvs_store.append(cvs_list)
             # turn off track
             self.simulation.context.setParameter("track", 0)
-        cvs = np.array(cvs, dtype=np.float64)
 
-        return positions, velocities, forces, pe, ke, cell, cvs
+        return positions, velocities, forces, pe, ke, cell, cvs_list
 
     def generate_long_trajectory(
         self,
-        init_pos=None,
-        num_data_points=int(1e8),
-        save_freq=1000,
-        h5_freq=100,
-        enforce_periodic_box=True,
-        tag=None,
-        time_max=117 * 60,
-        precision=32,
-        burn_in=1,
-        swap_freq=1,
-        **kwargs,  # Ignore string method parameters
-    ):
+        init_pos: NDArray[Any] | None = None,
+        num_data_points: int = int(1e8),
+        save_freq: int = 1000,
+        h5_freq: int = 100,
+        enforce_periodic_box: bool = True,
+        tag: str | None = None,
+        time_max: float = 117 * 60,
+        precision: int = 32,
+        burn_in: int = 1,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        swap_freq: int = 1,
+    ) -> None:
         """Generates long trajectory with replica exchange swaps."""
         # Setup phase
         tag = self._setup_trajectory_tag(tag)
@@ -213,7 +230,9 @@ class OMMFFReplica(OMMFF):
         # Natural completion cleanup
         self._cleanup_replica_trajectory_files(h5_file)
 
-    def _setup_replica_trajectory_files(self, start_iter, h5_freq, precision):
+    def _setup_replica_trajectory_files(
+        self, start_iter: int, h5_freq: int, precision: int
+    ) -> TrajWriter:
         """Setup replica-specific trajectory files."""
         h5_chunk = -(start_iter % h5_freq) + h5_freq + 1
         return TrajWriter(
@@ -226,8 +245,15 @@ class OMMFFReplica(OMMFF):
         )
 
     def _run_replica_trajectory_iteration(
-        self, iteration, save_freq, tag, h5_file, h5_freq, precision, swap_freq
-    ):
+        self,
+        iteration: int,
+        save_freq: int,
+        tag: str,
+        h5_file: TrajWriter,
+        h5_freq: int,
+        precision: int,
+        swap_freq: int,
+    ) -> TrajWriter:
         """Run a single replica trajectory iteration."""
         # Run simulation step
         self.run_sim(save_freq)
@@ -240,7 +266,9 @@ class OMMFFReplica(OMMFF):
 
         # Handle replica swaps
         if self._should_attempt_swap(iteration, swap_freq):
-            self._perform_replica_swap(cvs)
+            # Convert cvs list to numpy array for swap operation
+            cvs_array = np.array(cvs, dtype=np.float64)
+            self._perform_replica_swap(cvs_array)
 
         # Write trajectory frame with replica rank
         h5_file.write_frame(
@@ -253,11 +281,13 @@ class OMMFFReplica(OMMFF):
 
         return h5_file
 
-    def _should_attempt_swap(self, iteration, swap_freq):
+    def _should_attempt_swap(self, iteration: int, swap_freq: int) -> bool:
         """Check if replica swap should be attempted."""
         return iteration % swap_freq == 0 and self.comm is not None and iteration != 0
 
-    def _rotate_replica_trajectory_files(self, h5_file, h5_freq, precision):
+    def _rotate_replica_trajectory_files(
+        self, h5_file: TrajWriter, h5_freq: int, precision: int
+    ) -> TrajWriter:
         """Rotate replica trajectory files."""
         self.simulation.reporters[1].close()
         self.internal_count += 1
@@ -279,12 +309,14 @@ class OMMFFReplica(OMMFF):
             rank=True,
         )
 
-    def _cleanup_replica_trajectory_files(self, h5_file):
+    def _cleanup_replica_trajectory_files(self, h5_file: TrajWriter) -> None:
         """Clean up replica trajectory files."""
         self.simulation.reporters[1].close()
         h5_file.early_close()
 
-    def _gather_replica_data(self, cvs):
+    def _gather_replica_data(
+        self, cvs: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[Any]]:
         """Gather collective variables and replica ranks from all processes."""
         cvs_all = np.zeros((self.size, len(cvs)), dtype=np.float64)
         self.comm.Allgather(cvs, cvs_all)
@@ -296,8 +328,10 @@ class OMMFFReplica(OMMFF):
 
         return cvs_all, replica_rank_all
 
-    def _update_replica_parameters(self, replica_rank_new):
+    def _update_replica_parameters(self, replica_rank_new: NDArray[Any]) -> None:
         """Update simulation context parameters based on new replica assignment."""
+        assert self.parameter_name is not None, "parameter_name must be set"
+        assert self.parameter_force_name is not None, "parameter_force_name must be set"
         if replica_rank_new[self.rank] != self.replica_rank:
             for i, name in enumerate(self.parameter_name):
                 self.simulation.context.setParameter(
@@ -309,7 +343,7 @@ class OMMFFReplica(OMMFF):
                 )
         self.replica_rank = replica_rank_new[self.rank]
 
-    def _save_swap_results(self, replica_rank_new):
+    def _save_swap_results(self, replica_rank_new: NDArray[Any]) -> None:
         """Save replica ranks and swap rates to HDF5 files."""
         with h5py.File("replica_ranks.h5", "a") as f:
             dset_name = f"config_{self.count}_{len(f.keys())}"
@@ -320,7 +354,7 @@ class OMMFFReplica(OMMFF):
             group.create_dataset("num_accepted", data=self.num_accepted)
             group.create_dataset("num_attempted", data=self.num_attempted)
 
-    def _perform_replica_swap(self, cvs):
+    def _perform_replica_swap(self, cvs: NDArray[np.float64]) -> None:
         """Perform replica exchange swap attempt."""
         cvs_all, replica_rank_all = self._gather_replica_data(cvs)
 
@@ -368,28 +402,34 @@ class OMMFFReplica(OMMFF):
             self._save_swap_results(replica_rank_new)
 
 
-@numba.njit
+@numba.njit  # type: ignore[misc]
 def mix_replicas(
-    beta,
-    cvs_all,
-    parameter_values,
-    force_values,
-    replica_rank,
-    nswap_attemps,
-):
+    beta: float,
+    cvs_all: NDArray[np.float64],
+    parameter_values: NDArray[np.float64],
+    force_values: NDArray[np.float64],
+    replica_rank: NDArray[Any],
+    nswap_attemps: int,
+) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any]]:
     """Mixes replicas based on the Metropolis criterion.
 
     Arguments:
         beta: A float corresponding to the inverse temperature
-        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
-        parameter_values: A numpy array of shape (n_replicas, n_parameters) corresponding to the parameter values of all replicas
-        force_values: A numpy array of shape (n_replicas, n_forces) corresponding to the force values of all replicas
+        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding
+            to the collective variables of all replicas
+        parameter_values: A numpy array of shape (n_replicas, n_parameters)
+            corresponding to the parameter values of all replicas
+        force_values: A numpy array of shape (n_replicas, n_forces)
+            corresponding to the force values of all replicas
         replica_rank: An int corresponding to the rank of the current replica
         nswap_attemps: An int specifying the number of swap attempts
     Returns:
-        replica_rank: An int corresponding to the new rank of the replica after mixing
-        num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
-        num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
+        replica_rank: An int corresponding to the new rank of the replica
+            after mixing
+        num_accepted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of accepted swaps between replicas
+        num_attempted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of attempted swaps between replicas
     """
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]
@@ -437,26 +477,32 @@ def mix_replicas(
     return replica_rank, num_accepted, num_attempted
 
 
-@numba.njit
+@numba.njit  # type: ignore[misc]
 def mix_neighboring_replicas(
-    beta,
-    cvs_all,
-    parameter_values,
-    force_values,
-    replica_rank,
-):
+    beta: float,
+    cvs_all: NDArray[np.float64],
+    parameter_values: NDArray[np.float64],
+    force_values: NDArray[np.float64],
+    replica_rank: NDArray[Any],
+) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any]]:
     """Mixes replicas based on the Metropolis criterion.
 
     Arguments:
         beta: A float corresponding to the inverse temperature
-        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding to the collective variables of all replicas
-        parameter_values: A numpy array of shape (n_replicas, n_parameters) corresponding to the parameter values of all replicas
-        force_values: A numpy array of shape (n_replicas, n_forces) corresponding to the force values of all replicas
+        cvs_all: A numpy array of shape (n_replicas, n_cvs) corresponding
+            to the collective variables of all replicas
+        parameter_values: A numpy array of shape (n_replicas, n_parameters)
+            corresponding to the parameter values of all replicas
+        force_values: A numpy array of shape (n_replicas, n_forces)
+            corresponding to the force values of all replicas
         replica_rank: An int corresponding to the rank of the current replica
     Returns:
-        replica_rank: An int corresponding to the new rank of the replica after mixing
-        num_accepted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of accepted swaps between replicas
-        num_attempted: A numpy array of shape (n_replicas, n_replicas) corresponding to the number of attempted swaps between replicas
+        replica_rank: An int corresponding to the new rank of the replica
+            after mixing
+        num_accepted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of accepted swaps between replicas
+        num_attempted: A numpy array of shape (n_replicas, n_replicas)
+            corresponding to the number of attempted swaps between replicas
     """
     # precompute the acceptance probabilities
     n_replicas = cvs_all.shape[0]

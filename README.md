@@ -6,8 +6,7 @@ An implementation of the string method in [collective variables](https://doi.org
 
 ```console
 
-mamba env create -f environment.yml
-pip install -e .
+pixi install
 
 ```
 

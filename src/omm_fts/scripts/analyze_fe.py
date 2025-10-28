@@ -2,16 +2,20 @@
 
 import argparse
 import glob
+from typing import TYPE_CHECKING, Any
 
-import h5py
+import h5py  # type: ignore[import-untyped]
 import numpy as np
-from scipy.integrate import cumulative_simpson
-from scipy.interpolate import CubicSpline
+from scipy.integrate import cumulative_simpson  # type: ignore[import-untyped]
+from scipy.interpolate import CubicSpline  # type: ignore[import-untyped]
 
 from omm_fts.utils.natural_sort import natural_sort
 
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
-def main():
+
+def main() -> None:
     """Perform free energy analysis on OpenMM simulations."""
     parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
     parser.add_argument(
@@ -34,21 +38,21 @@ def main():
     )
 
     args = parser.parse_args()
-    string_file = args.string_file
-    burn_in = args.burn_in
-    num_bootstrap = args.num_bootstrap
+    string_file: str = args.string_file
+    burn_in: int = args.burn_in
+    num_bootstrap: int = args.num_bootstrap
 
     # now to load in files
     with h5py.File(string_file, "r") as f:
-        cvs_string = f["cvs"][:]
+        cvs_string: NDArray[Any] = f["cvs"][:]
 
     num_folders = cvs_string.shape[0]
-    cv_data = []
-    rank = []
+    cv_data_list: list[NDArray[Any]] = []
+    rank_list: list[NDArray[Any]] = []
     for i in range(num_folders):
         files = natural_sort(glob.glob(f"runs_restart/{i}/ala2_*_data.h5"))
-        cv_data_ = []
-        rank_ = []
+        cv_data_: list[NDArray[Any]] = []
+        rank_: list[NDArray[Any]] = []
         for file in files[burn_in:]:
             with h5py.File(file, "r") as f_data:
                 cv_0 = f_data["cv_0"][:]
@@ -57,19 +61,19 @@ def main():
                 cvs = cvs.squeeze(0)
                 cv_data_.append(cvs)
                 rank_.append(f_data["rank"][:])
-        cv_data_ = np.concatenate(cv_data_)
-        rank_ = np.concatenate(rank_)
-        cv_data.append(cv_data_)
-        rank.append(rank_)
+        cv_data_concat: NDArray[Any] = np.concatenate(cv_data_)
+        rank_concat: NDArray[Any] = np.concatenate(rank_)
+        cv_data_list.append(cv_data_concat)
+        rank_list.append(rank_concat)
 
-    cv_data = np.array(cv_data)
-    rank = np.array(rank)
+    cv_data: NDArray[Any] = np.array(cv_data_list)
+    rank: NDArray[Any] = np.array(rank_list)
     cv_data = cv_data.reshape(-1, 2)
     rank = rank.reshape(-1)
 
     # free energy along collective variables
-    k_values = np.array([250, 250])
-    integral_bs = []
+    k_values: NDArray[Any] = np.array([250, 250])
+    integral_bs_list: list[NDArray[Any]] = []
     for _ in range(num_bootstrap):
         cvs_average = np.zeros((num_folders, 2))
         for i in range(num_folders):
@@ -86,8 +90,8 @@ def main():
         df_ds = np.sum(df_ds, axis=1)
         integral = cumulative_simpson(y=df_ds, x=t_spline)
         integral = np.append(0, integral)
-        integral_bs.append(integral)
-    integral_bs = np.array(integral_bs)
+        integral_bs_list.append(integral)
+    integral_bs: NDArray[Any] = np.array(integral_bs_list)
     integral_bs_mean = np.mean(integral_bs, axis=0)
     integral_bs_std = np.std(integral_bs, axis=0)
 

@@ -2,20 +2,22 @@
 
 import argparse
 import glob
+from typing import Any
 
-import gsd
-import gsd.hoomd
-import mdtraj as md
+import gsd  # type: ignore[import-untyped]
+import gsd.hoomd  # type: ignore[import-untyped]
+import mdtraj as md  # type: ignore[import-untyped]
 import numpy as np
+from numpy.typing import NDArray
 
 from omm_fts.utils.natural_sort import natural_sort
 
 
-def boolean_string(s):
+def boolean_string(s: str) -> bool:
     """Convert a string to a boolean value."""
     if s not in {"False", "True", "false", "true"}:
         raise ValueError("Not a valid boolean string")
-    return s == "True" or s == "true"
+    return s in {"True", "true"}
 
 
 # Load in h5 files, convert to gsd
@@ -26,8 +28,8 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
-files_to_convert = args.files_to_convert
-include_last = args.include_last
+files_to_convert: str = args.files_to_convert
+include_last: bool = args.include_last
 
 # gather all files that end with h5 and don't have "data" in them
 files = glob.glob(f"{files_to_convert}*.h5")
@@ -43,23 +45,23 @@ print(files)
 # get the number of atoms and unit cell
 traj = md.load(files[0])
 
-n_atoms = traj.n_atoms
-unit_cell = traj.unitcell_lengths[0]
+n_atoms: int = traj.n_atoms
+unit_cell: NDArray[Any] = traj.unitcell_lengths[0]
 
 # get positions
-positions = []
+positions_list: list[NDArray[Any]] = []
 
 for file in files:
     traj = md.load(file)
-    positions.append(traj.xyz)
+    positions_list.append(traj.xyz)
 
-positions = np.concatenate(positions, axis=0)
+positions: NDArray[Any] = np.concatenate(positions_list, axis=0)
 
 # get elements
-elements = []
+elements: list[str] = []
 
 traj = md.load(files[0])
-elements_2 = []
+elements_2: list[str] = []
 for atom in traj.topology.atoms:
     elements_2.append(str(atom.element.symbol))
 
@@ -67,8 +69,10 @@ for atom in traj.topology.atoms:
 elements = list(set(elements_2))
 
 # get bonds
-bonds = [[bond[0].index, bond[1].index] for bond in traj.topology.bonds]
-bonds = np.array(bonds)
+bonds_list: list[list[int]] = [
+    [bond[0].index, bond[1].index] for bond in traj.topology.bonds
+]
+bonds: NDArray[Any] = np.array(bonds_list)
 
 positions *= 10  # convert to angstroms
 unit_cell *= 10
@@ -81,7 +85,15 @@ positions -= np.rint(positions / unit_cell) * unit_cell
 gsd_file = gsd.hoomd.open("trajectory.gsd", "w")
 
 
-def create_frame(i, n_atoms, positions, elements, elements_2, unit_cell, bonds):
+def create_frame(
+    i: int,
+    n_atoms: int,
+    positions: NDArray[Any],
+    elements: list[str],
+    elements_2: list[str],
+    unit_cell: NDArray[Any],
+    bonds: NDArray[Any],
+) -> Any:
     """Create a GSD frame for a given time step."""
     frame = gsd.hoomd.Frame()
     frame.configuration.step = i

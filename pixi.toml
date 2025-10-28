@@ -1,0 +1,39 @@
+[project]
+name = "openmm_fts"
+channels = ["conda-forge", "omnia"]
+platforms = ["linux-64", "osx-arm64", "osx-64"]
+
+[dependencies]
+python = ">=3.8"
+numpy = "*"
+scipy = "*"
+matplotlib = "*"
+h5py = "*"
+numba = "*"
+mdtraj = "*"
+openmm = "*"
+openmmtools = "*"
+mpi4py = "*"
+gsd = "*"
+
+[pypi-dependencies]
+openmm_fts = { path = ".", editable = true }
+openmm_csvr = { git = "https://github.com/cbatton/openmm_csvr.git" }
+
+[environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[feature.dev.tasks]
+fmt = { cmd = "ruff format" }
+lint = { cmd = "ruff check --fix" }
+types = { cmd = "mypy src/omm_fts" }
+test = { cmd = "pytest" }
+all = { depends-on = ["fmt", "lint", "types", "test"] }
+
+[feature.dev.dependencies]
+pytest = ">=8.3"
+pytest-cov = ">=6.0"
+ruff = ">=0.11"
+mypy = ">=1.15"
+pre-commit = ">=4.2"

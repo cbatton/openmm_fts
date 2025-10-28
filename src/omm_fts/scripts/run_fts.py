@@ -1,26 +1,30 @@
-"""Runs the Hamiltonian replica-exchange on alanine dipeptide in vacuum."""
+"""Runs the finite-temperature string method on alanine dipeptide in vacuum."""
 
 import argparse
 from pathlib import Path
 
-import h5py
-import numpy as np
-import openmm.unit as u
+import openmm.unit as u  # type: ignore[import-untyped]
 
 # Import MPI
 from mpi4py import MPI
-from openmm.openmm import CustomCVForce, CustomTorsionForce
-from openmmtools import testsystems
+from openmm.openmm import (  # type: ignore[import-untyped]
+    CustomCVForce,
+    CustomTorsionForce,
+)
+from openmmtools import testsystems  # type: ignore[import-untyped]
 
-from omm_fts.omm.omm_replica import OMMFFReplica
+from omm_fts.omm.omm_fts import OMMFF
 
 
-def main():
-    """Run the Hamiltonian replica-exchange simulation."""
+def main() -> None:
+    """Main function to run the finite-temperature string method.
+
+    Runs on alanine dipeptide.
+    """
     comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
+    rank: int = comm.Get_rank()
+    size: int = comm.Get_size()
 
-    # Run MPI umbrella sampling simulation
     parser = argparse.ArgumentParser(description="Run alanine dipeptide in vacuum")
     parser.add_argument(
         "--integrator", type=str, help="Integrator to use", default="csvr_leapfrog"
@@ -28,30 +32,16 @@ def main():
     parser.add_argument(
         "--seed", type=int, help="Seed for the simulation", default=rank
     )
-    parser.add_argument(
-        "--string_file",
-        type=str,
-        help="String file to use",
-        default="ala2_interpolated_string.h5",
-    )
-    parser.add_argument(
-        "--num_data_points",
-        type=int,
-        help="Number of data points to collect",
-        default=1000,
-    )
 
     args = parser.parse_args()
-    integrator = args.integrator
-    seed = args.seed
-    string_file = args.string_file
-    num_data_points = args.num_data_points
+    integrator: str = args.integrator
+    seed: int = args.seed
 
     temperature = 300 * u.kelvin
     print(temperature)
 
     ala2 = testsystems.AlanineDipeptideImplicit()
-    folder_name = f"runs_restart/{seed}/"
+    folder_name = f"runs/{seed}/"
     file_name = f"{folder_name}ala2"
     if not Path(folder_name).exists():
         Path(folder_name).mkdir(parents=True)
@@ -74,19 +64,19 @@ def main():
     cv1.addTorsion(6, 8, 14, 16)
     cv1.setForceGroup(17)
 
-    # read values from restart
-    with h5py.File(string_file, "r") as f:
-        cvs = f["cvs"][:]
-        phi0 = cvs[rank, 0] * u.radian
-        psi0 = cvs[rank, 1] * u.radian
-
     # prepare more traditional biasing variables
     cv0_record = CustomTorsionForce("theta")
     cv0_record.addTorsion(4, 6, 8, 14)
     cv0_bias = CustomCVForce(
-        "0.5 * kphi * delta^2; delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), abs(theta - phi0 - 2*pi)); pi=3.141592653589793"
+        "0.5 * kphi * delta^2; "
+        "delta = min(min(abs(theta - phi0), abs(theta - phi0 + 2*pi)), "
+        "abs(theta - phi0 - 2*pi)); "
+        "pi=3.141592653589793"
     )
     kphi = 250 * u.kilojoules_per_mole / u.radian**2
+    phi0_start = -2.51 * u.radian
+    phi0_end = 0.82 * u.radian
+    phi0 = phi0_start + (phi0_end - phi0_start) * rank / (size - 1)
     cv0_bias.addCollectiveVariable("theta", cv0_record)
     cv0_bias.addGlobalParameter("kphi", kphi)
     cv0_bias.addGlobalParameter("phi0", phi0)
@@ -94,9 +84,15 @@ def main():
     cv1_record = CustomTorsionForce("theta")
     cv1_record.addTorsion(6, 8, 14, 16)
     cv1_bias = CustomCVForce(
-        "0.5 * kpsi * delta^2; delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), abs(theta - psi0 - 2*pi)); pi=3.141592653589793"
+        "0.5 * kpsi * delta^2; "
+        "delta = min(min(abs(theta - psi0), abs(theta - psi0 + 2*pi)), "
+        "abs(theta - psi0 - 2*pi)); "
+        "pi=3.141592653589793"
     )
     kpsi = 250 * u.kilojoules_per_mole / u.radian**2
+    psi0_start = 2.83 * u.radian
+    psi0_end = -1.88 * u.radian
+    psi0 = psi0_start + (psi0_end - psi0_start) * rank / (size - 1)
     cv1_bias.addCollectiveVariable("theta", cv1_record)
     cv1_bias.addGlobalParameter("kpsi", kpsi)
     cv1_bias.addGlobalParameter("psi0", psi0)
@@ -105,11 +101,7 @@ def main():
     parameter_name = ["phi0", "psi0"]
     force_parameter_name = ["kphi", "kpsi"]
 
-    traj_init = np.load("ala2_initial_positions.npy")
-    positions = traj_init[rank]
-    ala2.positions = positions
-
-    omm_ff = OMMFFReplica(
+    omm_ff = OMMFF(
         ala2,
         platform="CPU",
         seed=seed + 1,
@@ -123,18 +115,18 @@ def main():
         force_groups=force_groups,
         parameter_name=parameter_name,
         parameter_force_name=force_parameter_name,
+        string_freq=5,
+        string_dt=0.1,
+        string_kappa=0.05,
+        cv_weights=[1.0, 1.0],
+        update_ends=True,
         custom_forces=[cv0_bias, cv1_bias],
         comm=comm,
+        minimize_init=True,
+        minimize_intervals=40,
     )
-    comm.Barrier()
-    if rank == 0:
-        print("Starting simulation")
     omm_ff.generate_long_trajectory(
-        num_data_points=num_data_points,
-        burn_in=0,
-        save_freq=100,
-        h5_freq=10,
-        swap_freq=20,
+        num_data_points=1000, burn_in=15, save_freq=100, h5_freq=10
     )
 
 
