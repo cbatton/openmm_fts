@@ -162,16 +162,16 @@ class OMMFF:
         if self.comm is not None:
             self.rank: int = self.comm.Get_rank()
             self.size: int = self.comm.Get_size()
-        # create vectors for Thomas algorithm
-        self.a_vec: NDArray[np.float64] = np.zeros(self.size - 1, dtype=np.float64)
-        self.b_vec: NDArray[np.float64] = np.zeros(self.size, dtype=np.float64)
-        self.c_vec: NDArray[np.float64] = np.zeros(self.size - 1, dtype=np.float64)
-        if self.string_kappa is not None:
-            self.a_vec[:-1] = -self.string_kappa
-            self.c_vec[1:] = -self.string_kappa
-            self.b_vec[1:-1] = 1 + 2 * self.string_kappa
-            self.b_vec[0] = 1
-            self.b_vec[-1] = 1
+            # create vectors for Thomas algorithm
+            self.a_vec: NDArray[np.float64] = np.zeros(self.size - 1, dtype=np.float64)
+            self.b_vec: NDArray[np.float64] = np.zeros(self.size, dtype=np.float64)
+            self.c_vec: NDArray[np.float64] = np.zeros(self.size - 1, dtype=np.float64)
+            if self.string_kappa is not None:
+                self.a_vec[:-1] = -self.string_kappa
+                self.c_vec[1:] = -self.string_kappa
+                self.b_vec[1:-1] = 1 + 2 * self.string_kappa
+                self.b_vec[0] = 1
+                self.b_vec[-1] = 1
         self.adam: Adam
 
     def _create_integrator(
